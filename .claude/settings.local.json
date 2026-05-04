@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(where python *)",
+      "Bash(awk -F= '{ key=$1; sub\\(\"^[^=]*=\",\"\",$0\\); val=$0; if \\(key==\"DISCORD_TOKEN\"\\) { len=length\\(val\\); printf \"%s: len=%d, placeholder=%s\\\\n\", key, len, \\(val==\"il-tuo-token-discord\"?\"YES\":\"no\"\\) } else if \\(key==\"NOVA_MEMORY_DIR\" || key==\"USER_MEMORY_DIR\"\\) { printf \"%s: %s\\\\n\", key, val } else { printf \"%s: %s\\\\n\", key, val } }')",
+      "Bash(where claude *)",
+      "Bash(claude --version)",
+      "Bash(where py *)",
+      "Bash(py -3.12 --version)",
+      "Bash(py -0)",
+      "Bash(\"C:\\\\Users\\\\Federico\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python312\\\\python.exe\" --version)",
+      "Bash(\"C:\\\\Users\\\\Federico\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python312\\\\python.exe\" -m venv .venv)",
+      "Bash(.venv/Scripts/python.exe --version)",
+      "Bash(.venv/Scripts/python.exe -m pip install --upgrade pip)",
+      "Bash(.venv/Scripts/python.exe -m pip install -r requirements.txt)",
+      "Bash(.venv/Scripts/python.exe nova_bot.py)",
+      "Bash(.venv/Scripts/python.exe -m pip install opentelemetry-api)",
+      "Bash(.venv/Scripts/python.exe -c \"from nova_mcp import build_memory_server; from pathlib import Path; s = build_memory_server\\(Path\\('.'\\)\\); print\\('mcp build OK:', type\\(s\\).__name__\\)\")",
+      "Bash(mkdir -p 'C:/Users/Federico/OneDrive/Documenti/Claude/Projects/Five Nights At Catanzaro'\\\\''s/nova_memory/server/1064676554434695258')",
+      "Bash([ -f \"$FNAC/$f\" ])",
+      "Bash(mv 'C:/Users/Federico/OneDrive/Documenti/Claude/Projects/Five Nights At Catanzaro'\\\\''s/nova_memory/__TRACKED_VAR__' 'C:/Users/Federico/OneDrive/Documenti/Claude/Projects/Five Nights At Catanzaro'\\\\''s/nova_memory/server/1064676554434695258/__TRACKED_VAR__')",
+      "Bash(.venv/Scripts/python.exe -c ' *)",
+      "Bash(.venv/Scripts/python.exe -c \"import nova_bot; print\\('imports OK'\\)\")"
+    ]
+  }
+}

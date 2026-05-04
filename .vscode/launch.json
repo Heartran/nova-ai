@@ -1,0 +1,28 @@
+{
+	"version": "0.2.0",
+	"configurations": [
+		{
+			"name": "Nova bot (debug)",
+			"type": "debugpy",
+			"request": "launch",
+			"program": "${workspaceFolder}/nova_bot.py",
+			"console": "integratedTerminal",
+			"justMyCode": true,
+			"envFile": "${workspaceFolder}/.env",
+			"python": "${workspaceFolder}/.venv/Scripts/python.exe"
+		},
+		{
+			"name": "Nova bot (verbose, log DEBUG)",
+			"type": "debugpy",
+			"request": "launch",
+			"program": "${workspaceFolder}/nova_bot.py",
+			"console": "integratedTerminal",
+			"justMyCode": false,
+			"envFile": "${workspaceFolder}/.env",
+			"python": "${workspaceFolder}/.venv/Scripts/python.exe",
+			"env": {
+				"LOG_LEVEL": "DEBUG"
+			}
+		}
+	]
+}

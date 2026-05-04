@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "nova-discord-bot",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": ["nova_bot.py"],
+      "port": null
+    }
+  ]
+}
