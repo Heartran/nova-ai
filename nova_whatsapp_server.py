@@ -185,14 +185,24 @@ async def _poll_loop(
     """Gira in background finché stop_event non è settato."""
     logging.getLogger("nova.whatsapp").setLevel(logging.WARNING)  # silenzioso in CLI
 
+    poll_count = 0
     while not stop_event.is_set():
         jids = config.watched_jids
         if jids and Path(db_path).exists():
+            poll_count += 1
             for jid in jids:
                 try:
                     await _poll_one(jid, checkpoints, config, db_path, api_url)
                 except Exception as exc:
                     _print_log(_c(RED, f"[poll] Errore su {jid}: {exc}"))
+        elif jids:
+            # DB non ancora disponibile
+            poll_count += 1
+
+        # Tick visivo ogni 12 poll (~60s con intervallo default di 5s)
+        if poll_count % 12 == 0 and jids:
+            ts = datetime.now().strftime("%H:%M:%S")
+            _print_log(_c(DIM, f"[{ts}] polling... ({poll_count} cicli, {len(jids)} chat)"))
 
         interval = config.poll_interval
         try:
@@ -374,19 +384,21 @@ def _cmd_chats(args: list[str], db_path: str) -> None:
     print()
 
 
-def _cmd_watch(args: list[str], config: WatchConfig, db_path: str) -> None:
+def _cmd_watch(args: list[str], config: WatchConfig, checkpoints: WhatsappCheckpoints, db_path: str) -> None:
     if not args:
         print(_c(YELLOW, "Uso: watch <jid | numero | nome>"))
         return
     jid = _resolve_jid(" ".join(args), config, db_path)
     if jid is None:
         return
-    # Trova il nome dalla lista per un messaggio più leggibile
     name = next((c["name"] for c in _last_chats if c["jid"] == jid), jid)
-    if config.add(jid):
-        print(_c(GREEN, f"✓ Aggiunta: {_c(BOLD, name)} ({jid})"))
+    already_watched = not config.add(jid)
+    # Resetta sempre il checkpoint a "adesso" — che sia nuova o già presente
+    checkpoints.update(jid, datetime.now(timezone.utc))
+    if already_watched:
+        print(_c(GREEN, f"✓ Checkpoint resettato: {_c(BOLD, name)} — ascolto da adesso"))
     else:
-        print(_c(YELLOW, f"'{name}' è già monitorata."))
+        print(_c(GREEN, f"✓ Aggiunta: {_c(BOLD, name)} ({jid}) — ascolto da adesso"))
 
 
 def _cmd_unwatch(args: list[str], config: WatchConfig, db_path: str) -> None:
@@ -471,6 +483,7 @@ def _cmd_help() -> None:
 
 async def _command_loop(
     config: WatchConfig,
+    checkpoints: WhatsappCheckpoints,
     stop_event: asyncio.Event,
     db_path: str,
     api_url: str,
@@ -493,7 +506,7 @@ async def _command_loop(
         elif cmd == "chats":
             _cmd_chats(args, db_path)
         elif cmd == "watch":
-            _cmd_watch(args, config, db_path)
+            _cmd_watch(args, config, checkpoints, db_path)
         elif cmd == "unwatch":
             _cmd_unwatch(args, config, db_path)
         elif cmd == "list":
@@ -551,7 +564,7 @@ async def _main(db_path: str, api_url: str, interval_override: float | None = No
 
     await asyncio.gather(
         _poll_loop(config, checkpoints, db_path, api_url, stop_event),
-        _command_loop(config, stop_event, db_path, api_url),
+        _command_loop(config, checkpoints, stop_event, db_path, api_url),
     )
 
     print(_c(DIM, "\nServer fermato."))
