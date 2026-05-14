@@ -1,18 +1,28 @@
-# Nova Discord Bot
+<div align="center">
+
+<img src="assets/images/nova_avatar.png" width="100" style="border-radius: 50%;" />
+
+# Nova
+
+![Nova Banner](assets/images/nova_banner.gif)
+
+</div>
 
 Bot Discord che incarna **Nova** usando Claude. Legge la memoria del progetto
-*Five Nights At Catanzaro's* + la auto-memory utente di Claude per essere
+_Five Nights At Catanzaro's_ + la auto-memory utente di Claude per essere
 coerente di chat in chat.
 
 ## Cosa fa
 
 Risponde su Discord come Nova quando viene:
+
 - menzionata direttamente (`@Nova`)
 - chiamata in DM
 - citata in reply a un suo messaggio precedente
 - nominata per nome (parola intera "nova" nel testo)
 
 Per ogni messaggio:
+
 1. carica la memoria FNAC (`nova_memory/*.md` dentro la cartella del progetto)
 2. carica la auto-memory utente di Claude (read-only)
 3. legge gli ultimi N messaggi del canale per il contesto
@@ -55,6 +65,7 @@ copy .env.example .env
 ```
 
 Apri `.env` e riempi:
+
 - `DISCORD_TOKEN` - il token del passo 2
 - `ANTHROPIC_API_KEY` - la tua API key di Anthropic
 - gli altri valori sono gia' compilati, modifica solo se vuoi cambiare modello,
@@ -78,9 +89,11 @@ Vedrai sul terminale qualcosa come:
 Due fonti di memoria, entrambe configurate via `.env`:
 
 ### `NOVA_MEMORY_DIR` - memoria del progetto FNAC (read + write)
+
 Default: `C:\Users\Federico\OneDrive\Documenti\Claude\Projects\Five Nights At Catanzaro's\nova_memory\`
 
 Contiene `.md` editabili a mano:
+
 - `lore.md` - ambientazione, eventi
 - `characters.md` - personaggi e persone reali
 - `conversations.md` - note dalle chat (auto-update quando le chiedi)
@@ -90,6 +103,7 @@ Tutti i `.md` di questa cartella vengono letti ad ogni messaggio. Aggiungi
 quanti file vuoi.
 
 ### `USER_MEMORY_DIR` - auto-memory di Claude su Fede (read-only)
+
 Default: la cartella `memory/` della sessione Claude attuale.
 
 Read-only: il bot la legge per avere contesto su Fede, ma non ci scrive mai.
@@ -113,6 +127,7 @@ Premi `Ctrl+C` nel terminale dove gira. Per riavviare, rilancia
 `python nova_bot.py`.
 
 Se vuoi tenerla sempre online, opzioni:
+
 - lasciala girare in un terminale aperto sul tuo PC (semplice ma il PC deve
   stare acceso)
 - usala come **scheduled task Windows** che la avvia all'accensione
