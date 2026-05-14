@@ -89,15 +89,15 @@ def _read_md_files(directory: Path, label: str) -> str:
 
 def scope_dir_for(base: Path, scope_type: str, scope_id: int | str) -> Path:
     """
-    Ritorna la cartella memoria per uno scope (server o DM).
+    Ritorna la cartella memoria per uno scope (server, DM o whatsapp).
 
     Args:
         base: NOVA_MEMORY_DIR
-        scope_type: "server" o "dm"
-        scope_id: guild_id (server) o user_id (dm)
+        scope_type: "server", "dm" o "whatsapp"
+        scope_id: guild_id (server), user_id (dm), chat JID (whatsapp)
     """
-    if scope_type not in ("server", "dm"):
-        raise ValueError(f"scope_type deve essere 'server' o 'dm', non {scope_type!r}")
+    if scope_type not in ("server", "dm", "whatsapp"):
+        raise ValueError(f"scope_type deve essere 'server', 'dm' o 'whatsapp', non {scope_type!r}")
     return base / scope_type / str(scope_id)
 
 
@@ -134,11 +134,20 @@ _DM_TEMPLATES = {
     "conversations.md": "# Note dei DM\n\n_Spazio dove annotare cose dette in DM che vale la pena ricordare._\n",
 }
 
+_WHATSAPP_TEMPLATES = {
+    "INDEX.md": (
+        "# Memoria di Nova — WhatsApp\n\n"
+        "Cartella per questa chat WhatsApp.\n"
+        "- `conversations.md` — note salienti emerse nella chat\n"
+    ),
+    "conversations.md": "# Note dalla chat WhatsApp\n\n_Spazio dove annotare cose dette in chat che vale la pena ricordare._\n",
+}
+
 
 def ensure_scope_skeleton(scope_dir: Path, scope_type: str = "server") -> None:
     """
     Crea la cartella di scope con i file template se non esiste.
-    scope_type: "server" o "dm" (template diversi).
+    scope_type: "server", "dm" o "whatsapp" (template diversi).
     """
     if scope_dir.exists():
         return
@@ -149,7 +158,12 @@ def ensure_scope_skeleton(scope_dir: Path, scope_type: str = "server") -> None:
         logger.error("Impossibile creare %s: %s", scope_dir, e)
         return
 
-    templates = _SERVER_TEMPLATES if scope_type == "server" else _DM_TEMPLATES
+    if scope_type == "server":
+        templates = _SERVER_TEMPLATES
+    elif scope_type == "whatsapp":
+        templates = _WHATSAPP_TEMPLATES
+    else:
+        templates = _DM_TEMPLATES
     for name, content in templates.items():
         path = scope_dir / name
         try:
