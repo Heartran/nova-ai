@@ -209,6 +209,13 @@ async def _poll_one(
     api_url: str,
 ) -> None:
     last_seen = checkpoints.get(jid)
+
+    # Prima volta che vediamo questo JID: segna "adesso" come punto di partenza
+    # e non rispondere ai messaggi già presenti.
+    if last_seen is None:
+        checkpoints.update(jid, datetime.now(timezone.utc))
+        return
+
     new_msgs = await asyncio.to_thread(_fetch_new_messages, db_path, jid, last_seen, 50)
     if not new_msgs:
         return
