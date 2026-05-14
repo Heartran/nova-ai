@@ -43,13 +43,6 @@ _HERE = Path(__file__).parent
 sys.path.insert(0, str(_HERE))
 load_dotenv(_HERE / ".env")
 
-from claude_agent_sdk import (
-    AssistantMessage,
-    ClaudeAgentOptions,
-    PermissionResultAllow,
-    TextBlock,
-    query,
-)
 from memory import (
     ensure_scope_skeleton,
     load_scope_memory,
@@ -57,7 +50,6 @@ from memory import (
     scope_dir_for,
 )
 from nova_mcp import build_memory_server
-from nova_read import audit_web
 from nova_whatsapp import (
     WhatsappCheckpoints,
     _build_messages_for_claude,
@@ -65,7 +57,6 @@ from nova_whatsapp import (
     _fetch_history,
     _fetch_new_messages,
     _send_via_bridge,
-    _serialize_history_wa,
 )
 from personality import build_system_prompt
 
@@ -250,14 +241,13 @@ async def _poll_one(
     )
 
     memory_server = build_memory_server(scope_dir)
-    requester = f"whatsapp:{jid}"
 
     _print_log(
         _c(CYAN, f"[{chat_name}]")
         + f" {len(new_msgs)} nuovi messaggi, rispondo..."
     )
 
-    reply = await _call_claude_wa(system_prompt, messages, memory_server, scope_dir, requester, CLAUDE_MODEL)
+    reply = await _call_claude_wa(system_prompt, messages, memory_server, CLAUDE_MODEL)
 
     if not reply:
         _print_log(_c(YELLOW, f"[{chat_name}] Risposta vuota da Claude"))

@@ -29,7 +29,6 @@ import requests
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
-    PermissionResultAllow,
     TextBlock,
     query,
 )
@@ -41,7 +40,6 @@ from memory import (
     scope_dir_for,
 )
 from nova_mcp import build_memory_server
-from nova_read import audit_web
 from personality import build_system_prompt
 
 logger = logging.getLogger("nova.whatsapp")
@@ -259,22 +257,10 @@ def _serialize_history_wa(messages: list[dict]) -> str:
 # Chiamata Claude (versione WhatsApp — senza Discord read server)
 # ---------------------------------------------------------------------------
 
-def _make_audit_cb(scope_dir: Path, requester: str):
-    async def can_use_tool(tool_name: str, tool_input: dict, context):
-        if tool_name == "WebFetch":
-            audit_web(scope_dir, requester, "WebFetch", str(tool_input.get("url") or "")[:300])
-        elif tool_name == "WebSearch":
-            audit_web(scope_dir, requester, "WebSearch", str(tool_input.get("query") or "")[:300])
-        return PermissionResultAllow()
-    return can_use_tool
-
-
 async def _call_claude_wa(
     system: str,
     messages: list[dict],
     memory_server,
-    scope_dir: Path,
-    requester: str,
     model: str,
 ) -> str:
     prompt = _serialize_history_wa(messages)
@@ -284,7 +270,6 @@ async def _call_claude_wa(
         mcp_servers={"nova_memory": memory_server},
         allowed_tools=_WA_ALLOWED_TOOLS,
         max_turns=6,
-        can_use_tool=_make_audit_cb(scope_dir, requester),
         setting_sources=[],
     )
     parts: list[str] = []
@@ -354,7 +339,6 @@ async def _process_chat(
     )
 
     memory_server = build_memory_server(scope_dir)
-    requester = f"whatsapp:{jid}"
 
     logger.info(
         "WA poll: %d nuovi messaggi in '%s', genero risposta...",
@@ -363,7 +347,7 @@ async def _process_chat(
     )
 
     try:
-        reply = await _call_claude_wa(system_prompt, messages, memory_server, scope_dir, requester, model)
+        reply = await _call_claude_wa(system_prompt, messages, memory_server, model)
     except Exception:
         logger.exception("Errore chiamata Claude per chat WA %s", jid)
         return
