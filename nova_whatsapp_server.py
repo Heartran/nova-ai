@@ -550,6 +550,13 @@ async def _main(db_path: str, api_url: str, interval_override: float | None = No
     if interval_override is not None:
         config.set_interval(interval_override)
     checkpoints = WhatsappCheckpoints(NOVA_MEMORY_DIR / "whatsapp_checkpoints.json")
+
+    # Al riavvio, resetta i checkpoint di tutti i JID già configurati a "adesso"
+    # per evitare di processare i messaggi accumulati durante il downtime.
+    now = datetime.now(timezone.utc)
+    for jid in config.watched_jids:
+        checkpoints.update(jid, now)
+
     stop_event = asyncio.Event()
 
     # Gestione Ctrl+C graceful
