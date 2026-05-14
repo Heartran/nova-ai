@@ -531,12 +531,14 @@ Scrivi {_c(CYAN, "help")} per i comandi, {_c(CYAN, "status")} per lo stato del b
 """)
 
 
-async def _main(db_path: str, api_url: str) -> None:
+async def _main(db_path: str, api_url: str, interval_override: float | None = None) -> None:
     if not NOVA_MEMORY_DIR or str(NOVA_MEMORY_DIR) == ".":
         sys.exit("Manca NOVA_MEMORY_DIR in .env")
     NOVA_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
     config = WatchConfig(CONFIG_FILE)
+    if interval_override is not None:
+        config.set_interval(interval_override)
     checkpoints = WhatsappCheckpoints(NOVA_MEMORY_DIR / "whatsapp_checkpoints.json")
     stop_event = asyncio.Event()
 
@@ -584,7 +586,7 @@ def main() -> None:
     logging.getLogger("nova").setLevel(logging.ERROR)
 
     try:
-        asyncio.run(_main(args.db, args.api))
+        asyncio.run(_main(args.db, args.api, args.interval))
     except KeyboardInterrupt:
         print(_c(DIM, "\nInterrotto."))
 
