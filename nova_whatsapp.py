@@ -36,6 +36,7 @@ from claude_agent_sdk import (
 from memory import (
     ensure_scope_skeleton,
     load_scope_memory,
+    load_shared_memory,
     load_user_memory,
     scope_dir_for,
 )
@@ -326,6 +327,7 @@ async def _process_chat(
     ensure_scope_skeleton(scope_dir, "whatsapp")
 
     scope_mem = load_scope_memory(scope_dir)
+    shared_mem = load_shared_memory(nova_memory_dir)
     user_mem = load_user_memory(user_memory_dir) if user_memory_dir.exists() else ""
 
     # Recupera contesto storico precedente
@@ -336,7 +338,9 @@ async def _process_chat(
     messages = _build_messages_for_claude(history, new_msgs)
     chat_name = new_msgs[0].get("chat_name") or jid
 
-    system_prompt = build_system_prompt(scope_mem, user_mem, bot_display_name="Nova")
+    system_prompt = build_system_prompt(
+        shared_mem, scope_mem, user_mem, bot_display_name="Nova"
+    )
     system_prompt += (
         f"\n\n## Contesto attuale\n"
         f"Stai rispondendo in una chat WhatsApp: **{chat_name}**.\n"

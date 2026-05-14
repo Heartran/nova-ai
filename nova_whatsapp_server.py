@@ -45,7 +45,9 @@ load_dotenv(_HERE / ".env")
 
 from memory import (
     ensure_scope_skeleton,
+    ensure_shared_skeleton,
     load_scope_memory,
+    load_shared_memory,
     load_user_memory,
     scope_dir_for,
 )
@@ -242,6 +244,7 @@ async def _poll_one(
     scope_dir = scope_dir_for(NOVA_MEMORY_DIR, "whatsapp", jid)
     ensure_scope_skeleton(scope_dir, "whatsapp")
     scope_mem = load_scope_memory(scope_dir)
+    shared_mem = load_shared_memory(NOVA_MEMORY_DIR)
     user_mem = load_user_memory(USER_MEMORY_DIR) if USER_MEMORY_DIR.exists() else ""
 
     history = await asyncio.to_thread(
@@ -250,7 +253,9 @@ async def _poll_one(
     messages = _build_messages_for_claude(history, new_msgs)
     chat_name = new_msgs[0].get("chat_name") or jid
 
-    system_prompt = build_system_prompt(scope_mem, user_mem, bot_display_name="Nova")
+    system_prompt = build_system_prompt(
+        shared_mem, scope_mem, user_mem, bot_display_name="Nova"
+    )
     system_prompt += (
         f"\n\n## Contesto attuale\n"
         f"Stai rispondendo in una chat WhatsApp: **{chat_name}**.\n"
@@ -545,6 +550,7 @@ async def _main(db_path: str, api_url: str, interval_override: float | None = No
     if not NOVA_MEMORY_DIR or str(NOVA_MEMORY_DIR) == ".":
         sys.exit("Manca NOVA_MEMORY_DIR in .env")
     NOVA_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_shared_skeleton(NOVA_MEMORY_DIR)
 
     config = WatchConfig(CONFIG_FILE)
     if interval_override is not None:

@@ -20,7 +20,15 @@
       "Bash([ -f \"$FNAC/$f\" ])",
       "Bash(mv 'C:/Users/Federico/OneDrive/Documenti/Claude/Projects/Five Nights At Catanzaro'\\\\''s/nova_memory/__TRACKED_VAR__' 'C:/Users/Federico/OneDrive/Documenti/Claude/Projects/Five Nights At Catanzaro'\\\\''s/nova_memory/server/1064676554434695258/__TRACKED_VAR__')",
       "Bash(.venv/Scripts/python.exe -c ' *)",
-      "Bash(.venv/Scripts/python.exe -c \"import nova_bot; print\\('imports OK'\\)\")"
+      "Bash(.venv/Scripts/python.exe -c \"import nova_bot; print\\('imports OK'\\)\")",
+      "Bash(dir C:\\\\Users\\\\Federico\\\\repo\\\\nova-ai\\\\*.py)",
+      "PowerShell(& \"C:\\\\Users\\\\Federico\\\\repo\\\\nova-ai\\\\.venv\\\\Scripts\\\\pip.exe\" install requests --quiet)",
+      "Bash(git checkout *)",
+      "Bash(git add *)",
+      "Bash(git -c user.name=Claude -c user.email=noreply@anthropic.com commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(gh pr create --title 'feat: interactive WhatsApp bridge server for Nova' --body ' *)",
+      "Bash(gh api graphql -f 'query= *)"
     ]
   }
 }
