@@ -14,6 +14,10 @@ Template developed by [Heartran](https://github.com/heartran)
 
 - `nova_read.py`: Logica di lettura e parsing dei file di memoria e contesto.
 
+- `nova_whatsapp.py`: Libreria condivisa per il bridge WhatsApp — accesso SQLite, invio messaggi, chiamata Claude.
+
+- `nova_whatsapp_server.py`: Server WhatsApp standalone interattivo. Avvio: `python nova_whatsapp_server.py`. CLI con comandi `chats`, `watch`, `unwatch`, `list`, `status`, `interval`. Config persistente in `NOVA_MEMORY_DIR/whatsapp_config.json`.
+
 - `slash_commands.py`: Definizione e gestione dei comandi slash Discord.
 
 - `checkpoints.py`: Gestione checkpoint per salvataggio e ripristino dello stato.

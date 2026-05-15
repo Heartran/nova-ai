@@ -2,12 +2,16 @@
 memory.py — Lettura/scrittura della memoria di Nova.
 
 Layout (sotto NOVA_MEMORY_DIR):
+  _shared/*.md                       <- letta SEMPRE (lore FNAC, regole globali)
   server/<guild_id>/{lore,characters,conversations,INDEX}.md
   dm/<user_id>/{conversations,INDEX}.md
+  whatsapp/<jid>/{conversations,INDEX}.md
 
-Due fonti combinate ad ogni messaggio:
-  1) memoria di scope (per server o per DM): read + write
-  2) USER_MEMORY_DIR: auto-memory utente di Claude (.md). Read-only.
+Tre fonti combinate ad ogni messaggio:
+  1) _shared/: memoria globale (lore, membri, regole comportamentali). Read + write.
+     Letta a OGNI risposta, indipendentemente dallo scope (Discord/DM/WhatsApp).
+  2) memoria di scope (per server, DM o WhatsApp): note specifiche della chat. Read + write.
+  3) USER_MEMORY_DIR: auto-memory utente di Claude (.md). Read-only.
 
 I file vengono letti ad ogni richiesta (no cache) cosi' Nova vede sempre
 l'ultima versione. Se la memoria un giorno diventasse enorme, qui si mette
@@ -25,6 +29,9 @@ logger = logging.getLogger(__name__)
 # Hard limit per evitare di saturare il context se la memoria cresce a dismisura.
 # 80 KB per sezione e' gia' un quintale di testo.
 MAX_SECTION_BYTES = 80_000
+
+# Nome della cartella condivisa sotto NOVA_MEMORY_DIR.
+SHARED_DIRNAME = "_shared"
 
 
 def _read_md_files(directory: Path, label: str) -> str:
@@ -89,22 +96,36 @@ def _read_md_files(directory: Path, label: str) -> str:
 
 def scope_dir_for(base: Path, scope_type: str, scope_id: int | str) -> Path:
     """
-    Ritorna la cartella memoria per uno scope (server o DM).
+    Ritorna la cartella memoria per uno scope (server, DM o whatsapp).
 
     Args:
         base: NOVA_MEMORY_DIR
-        scope_type: "server" o "dm"
-        scope_id: guild_id (server) o user_id (dm)
+        scope_type: "server", "dm" o "whatsapp"
+        scope_id: guild_id (server), user_id (dm), chat JID (whatsapp)
     """
-    if scope_type not in ("server", "dm"):
-        raise ValueError(f"scope_type deve essere 'server' o 'dm', non {scope_type!r}")
+    if scope_type not in ("server", "dm", "whatsapp"):
+        raise ValueError(f"scope_type deve essere 'server', 'dm' o 'whatsapp', non {scope_type!r}")
     return base / scope_type / str(scope_id)
 
 
+def shared_dir(base: Path) -> Path:
+    """Ritorna la cartella della memoria condivisa (NOVA_MEMORY_DIR/_shared)."""
+    return base / SHARED_DIRNAME
+
+
 def load_scope_memory(scope_dir: Path) -> str:
-    """Memoria di uno scope (server o DM): lore, characters, conversations, ecc."""
+    """Memoria di uno scope (server, DM o WhatsApp): note specifiche della chat."""
     label = "/".join(scope_dir.parts[-2:]) if len(scope_dir.parts) >= 2 else scope_dir.name
     return _read_md_files(scope_dir, f"SCOPE {label}")
+
+
+def load_shared_memory(base: Path) -> str:
+    """
+    Memoria condivisa: tutti i .md sotto NOVA_MEMORY_DIR/_shared/.
+    Letta a OGNI risposta, indipendentemente dallo scope.
+    Qui vive il lore del progetto, i membri ricorrenti, le regole globali.
+    """
+    return _read_md_files(shared_dir(base), "SHARED")
 
 
 def load_user_memory(user_memory_dir: Path) -> str:
@@ -134,11 +155,37 @@ _DM_TEMPLATES = {
     "conversations.md": "# Note dei DM\n\n_Spazio dove annotare cose dette in DM che vale la pena ricordare._\n",
 }
 
+_WHATSAPP_TEMPLATES = {
+    "INDEX.md": (
+        "# Memoria di Nova — WhatsApp\n\n"
+        "Cartella per questa chat WhatsApp.\n"
+        "- `conversations.md` — note salienti emerse nella chat\n\n"
+        "Il lore globale del progetto vive in `../../_shared/`, non qui.\n"
+    ),
+    "conversations.md": "# Note dalla chat WhatsApp\n\n_Spazio dove annotare cose dette in chat che vale la pena ricordare._\n",
+}
+
+_SHARED_TEMPLATES = {
+    "INDEX.md": (
+        "# Memoria condivisa di Nova\n\n"
+        "Tutti i `.md` in questa cartella vengono letti a OGNI risposta,\n"
+        "sia su Discord che su WhatsApp che in DM, in aggiunta alla memoria\n"
+        "specifica della chat (`server/`, `dm/`, `whatsapp/`).\n\n"
+        "Cosa mettere qui:\n"
+        "- lore globale del progetto (es. `fnac_lore.md`)\n"
+        "- chi e' chi nella cerchia, pattern ricorrenti delle persone\n"
+        "- regole comportamentali valide ovunque\n\n"
+        "Cosa NON mettere qui:\n"
+        "- note specifiche di una singola chat (quelle nello scope)\n"
+        "- segreti, token, credenziali\n"
+    ),
+}
+
 
 def ensure_scope_skeleton(scope_dir: Path, scope_type: str = "server") -> None:
     """
     Crea la cartella di scope con i file template se non esiste.
-    scope_type: "server" o "dm" (template diversi).
+    scope_type: "server", "dm" o "whatsapp" (template diversi).
     """
     if scope_dir.exists():
         return
@@ -149,12 +196,41 @@ def ensure_scope_skeleton(scope_dir: Path, scope_type: str = "server") -> None:
         logger.error("Impossibile creare %s: %s", scope_dir, e)
         return
 
-    templates = _SERVER_TEMPLATES if scope_type == "server" else _DM_TEMPLATES
+    if scope_type == "server":
+        templates = _SERVER_TEMPLATES
+    elif scope_type == "whatsapp":
+        templates = _WHATSAPP_TEMPLATES
+    else:
+        templates = _DM_TEMPLATES
     for name, content in templates.items():
         path = scope_dir / name
         try:
             path.write_text(content, encoding="utf-8")
             logger.info("Creato template %s", path)
+        except OSError as e:
+            logger.error("Errore scrittura %s: %s", path, e)
+
+
+def ensure_shared_skeleton(base: Path) -> None:
+    """
+    Crea NOVA_MEMORY_DIR/_shared/ con i file template se non esiste.
+    Idempotente: se la cartella c'e' gia', non tocca niente.
+    """
+    sd = shared_dir(base)
+    if sd.exists():
+        return
+
+    try:
+        sd.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        logger.error("Impossibile creare %s: %s", sd, e)
+        return
+
+    for name, content in _SHARED_TEMPLATES.items():
+        path = sd / name
+        try:
+            path.write_text(content, encoding="utf-8")
+            logger.info("Creato template shared %s", path)
         except OSError as e:
             logger.error("Errore scrittura %s: %s", path, e)
 

@@ -35,7 +35,9 @@ from dotenv import load_dotenv
 from checkpoints import ChannelCheckpoints
 from memory import (
     ensure_scope_skeleton,
+    ensure_shared_skeleton,
     load_scope_memory,
+    load_shared_memory,
     load_user_memory,
     scope_dir_for,
 )
@@ -80,6 +82,7 @@ logger = logging.getLogger("nova")
 # Lo scope (server o DM) viene risolto per ogni messaggio in `on_message`.
 # La cartella radice deve esistere, le sottocartelle nascono lazy.
 NOVA_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+ensure_shared_skeleton(NOVA_MEMORY_DIR)
 
 checkpoints = ChannelCheckpoints(NOVA_MEMORY_DIR / "checkpoints.json")
 
@@ -382,11 +385,14 @@ async def handle_message(message: discord.Message) -> None:
         ensure_scope_skeleton(scope_dir, scope_type)
 
         async with message.channel.typing():
+            shared_mem = load_shared_memory(NOVA_MEMORY_DIR)
             scope_mem = load_scope_memory(scope_dir)
             user_mem = load_user_memory(USER_MEMORY_DIR) if USER_MEMORY_DIR.exists() else ""
 
             bot_name = client.user.display_name if client.user else "Nova"
-            system_prompt = build_system_prompt(scope_mem, user_mem, bot_display_name=bot_name)
+            system_prompt = build_system_prompt(
+                shared_mem, scope_mem, user_mem, bot_display_name=bot_name
+            )
 
             messages = await collect_history(
                 message.channel, client.user, message, HISTORY_MESSAGES

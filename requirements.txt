@@ -1,3 +1,4 @@
 discord.py>=2.4.0
 claude-agent-sdk>=0.0.20
 python-dotenv>=1.0.0
+requests>=2.31.0

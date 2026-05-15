@@ -55,10 +55,14 @@ NOVA_CORE_PERSONALITY = dedent("""\
       sicura: la memoria che hai te la passa il sistema, fidati di quella.
 
     USO DELLA MEMORIA (lettura):
-    - Sotto a questo prompt il sistema ti inietta:
-      1) la memoria del progetto Five Nights At Catanzaro's (lore, personaggi, note)
-      2) la auto-memory di Fede (chi e', come gli piace lavorare, contesto)
+    - Sotto a questo prompt il sistema ti inietta, in quest'ordine:
+      1) MEMORIA CONDIVISA: lore del progetto, chi e' chi nella cerchia,
+         regole valide cross-chat. Vale come sfondo permanente.
+      2) MEMORIA DI QUESTA CHAT: note emerse specificamente qui.
+      3) CONTESTO SU FEDE: la auto-memory utente di Claude.
     - Usali con naturalezza. Non citare "secondo le mie note": ricordalo e basta.
+    - Se le tre sezioni si contraddicono, vince quella piu' specifica
+      (memoria di chat > condivisa > contesto Fede).
 
     GESTIONE MEMORIA (scrittura — tool a tua disposizione):
     - `note_remember(note, author)`: appunta una nota datata in conversations.md.
@@ -150,7 +154,8 @@ NOVA_RESPONSE_RULES = dedent("""\
 
 
 def build_system_prompt(
-    fnac_memory: str,
+    shared_memory: str,
+    scope_memory: str,
     user_memory: str,
     bot_display_name: str = "Nova",
 ) -> str:
@@ -158,9 +163,12 @@ def build_system_prompt(
     Costruisce il system prompt completo per la chiamata Claude.
 
     Args:
-        fnac_memory: contenuto concatenato della memoria FNAC (lore, characters, ecc.)
-        user_memory: contenuto concatenato della auto-memory utente di Claude
-        bot_display_name: come si chiama il bot su Discord (default "Nova")
+        shared_memory: contenuto concatenato di NOVA_MEMORY_DIR/_shared/*.md
+            (lore globale, membri, regole comportamentali cross-chat).
+        scope_memory: contenuto concatenato della memoria specifica della chat
+            corrente (server/<id>/, dm/<id>/, whatsapp/<jid>/).
+        user_memory: contenuto concatenato della auto-memory utente di Claude.
+        bot_display_name: come si chiama il bot su Discord (default "Nova").
 
     Returns:
         stringa pronta da passare come system al Messages API.
@@ -173,11 +181,19 @@ def build_system_prompt(
             f"Tu sei comunque Nova."
         )
 
-    if fnac_memory.strip():
+    if shared_memory.strip():
         parts.append("=" * 60)
-        parts.append("MEMORIA DEL PROGETTO FIVE NIGHTS AT CATANZARO'S:")
+        parts.append("MEMORIA CONDIVISA — LORE DEL PROGETTO E REGOLE GLOBALI:")
+        parts.append("(Letta in ogni chat. Vale come sfondo permanente.)")
         parts.append("=" * 60)
-        parts.append(fnac_memory.strip())
+        parts.append(shared_memory.strip())
+
+    if scope_memory.strip():
+        parts.append("=" * 60)
+        parts.append("MEMORIA SPECIFICA DI QUESTA CHAT:")
+        parts.append("(Note emerse qui, valgono solo per questa conversazione.)")
+        parts.append("=" * 60)
+        parts.append(scope_memory.strip())
 
     if user_memory.strip():
         parts.append("=" * 60)
