@@ -80,8 +80,65 @@ DEFAULT_BRIDGE_DB = str(
 DEFAULT_API_URL = os.getenv("WHATSAPP_API_URL", "http://localhost:8080/api").strip()
 DEFAULT_POLL_INTERVAL = float(os.getenv("WHATSAPP_POLL_INTERVAL", "5"))
 DEFAULT_HISTORY_LIMIT = int(os.getenv("WHATSAPP_HISTORY_LIMIT", "20"))
+_CONTACT_MAP_PATH = Path(os.getenv("WHATSAPP_CONTACT_MAP", "")).expanduser() if os.getenv("WHATSAPP_CONTACT_MAP") else None
 
 CONFIG_FILE = NOVA_MEMORY_DIR / "whatsapp_config.json"
+
+# ---------------------------------------------------------------------------
+# Contact map (optional, loaded from WHATSAPP_CONTACT_MAP env path)
+# ---------------------------------------------------------------------------
+
+def _load_contact_map(path: Path | None) -> dict:
+    if not path or not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+_CONTACT_MAP: dict = _load_contact_map(_CONTACT_MAP_PATH)
+
+
+def _contact_map_jid_variants(jid: str) -> list[str]:
+    """Return phone↔LID variants for a JID from the contact map."""
+    if not _CONTACT_MAP:
+        return [jid]
+    jids = [jid]
+    for entry in _CONTACT_MAP.values():
+        if not isinstance(entry, dict):
+            continue
+        related = {
+            entry.get("chat_jid"),
+            entry.get("lid"),
+            entry.get("legacy_phone_jid"),
+            *(f"{p}@s.whatsapp.net" for p in entry.get("phone_numbers", [])),
+        } - {None}
+        if jid in related:
+            for v in related:
+                if v and v not in jids:
+                    jids.append(v)
+    return jids
+
+
+def _contact_map_resolve_name(name: str) -> str | None:
+    """Look up a contact by name substring in the contact map; return chat_jid."""
+    if not _CONTACT_MAP:
+        return None
+    nl = name.lower()
+    matches = []
+    for key, entry in _CONTACT_MAP.items():
+        if not isinstance(entry, dict):
+            continue
+        entry_name = entry.get("name", key)
+        nicknames = entry.get("nicknames", [])
+        if nl in entry_name.lower() or any(nl in n.lower() for n in nicknames):
+            jid = entry.get("chat_jid") or entry.get("lid")
+            if jid and jid not in matches:
+                matches.append(jid)
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Minimal ANSI colors (zero extra dependencies)
@@ -229,7 +286,7 @@ async def _poll_one(
         checkpoints.update(jid, datetime.now(timezone.utc))
         return
 
-    new_msgs = await asyncio.to_thread(_fetch_new_messages, db_path, jid, last_seen, 50)
+    new_msgs = await asyncio.to_thread(_fetch_new_messages, db_path, jid, last_seen, 50, _CONTACT_MAP)
     if not new_msgs:
         return
 
@@ -243,7 +300,7 @@ async def _poll_one(
     checkpoints.update(jid, latest_ts)
 
     # Prefer the JID variant that already has a memory folder (LID migration).
-    jid_variants = await asyncio.to_thread(_resolve_jid_variants, db_path, jid)
+    jid_variants = await asyncio.to_thread(_resolve_jid_variants, db_path, jid, _CONTACT_MAP)
     scope_jid = next(
         (v for v in jid_variants if scope_dir_for(NOVA_MEMORY_DIR, "whatsapp", v).exists()),
         jid,
@@ -255,7 +312,7 @@ async def _poll_one(
     user_mem = load_user_memory(USER_MEMORY_DIR) if USER_MEMORY_DIR.exists() else ""
 
     history = await asyncio.to_thread(
-        _fetch_history, db_path, jid, new_msgs[0]["timestamp"], config.history_limit
+        _fetch_history, db_path, jid, new_msgs[0]["timestamp"], config.history_limit, _CONTACT_MAP
     )
     messages = _build_messages_for_claude(history, new_msgs)
     chat_name = new_msgs[0].get("chat_name") or jid
@@ -354,7 +411,11 @@ def _resolve_jid(arg: str, config: WatchConfig, db_path: str) -> str | None:
     if "@" in arg:
         return arg
 
-    # Name substring: search the last loaded chats or the DB
+    # Name substring: contact map first (authoritative phone↔LID), then cached list
+    contact_jid = _contact_map_resolve_name(arg)
+    if contact_jid:
+        return contact_jid
+
     candidates = [c for c in _last_chats if arg.lower() in c["name"].lower()]
     if len(candidates) == 1:
         return candidates[0]["jid"]

@@ -103,35 +103,62 @@ class WhatsappCheckpoints:
 # SQLite access (run in a thread to avoid blocking the event loop)
 # ---------------------------------------------------------------------------
 
-def _resolve_jid_variants(db_path: str, jid: str) -> list[str]:
-    """Return all JIDs (phone + LID) linked to the same contact in the bridge DB."""
+def _resolve_jid_variants(db_path: str, jid: str, contact_map: dict | None = None) -> list[str]:
+    """Return all JIDs (phone + LID) linked to the same contact.
+
+    Sources (merged, deduped):
+    1. contact_map JSON — authoritative phone↔LID mapping from WHATSAPP_CONTACT_MAP
+    2. bridge DB chats.lid column — available only on newer bridge schemas
+    """
+    jids: list[str] = [jid]
+
+    # 1. Contact map lookup
+    if contact_map:
+        related: set[str] = set()
+        for entry in contact_map.values():
+            if not isinstance(entry, dict):
+                continue
+            candidates = {
+                entry.get("chat_jid"),
+                entry.get("lid"),
+                entry.get("legacy_phone_jid"),
+                *(f"{p}@s.whatsapp.net" for p in entry.get("phone_numbers", [])),
+            } - {None}
+            if jid in candidates:
+                related |= candidates  # type: ignore[operator]
+        for v in related:
+            if v and v not in jids:
+                jids.append(v)
+
+    # 2. Bridge DB chats.lid column
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=0&cache=private", uri=True)
         cursor = conn.cursor()
         cursor.execute("PRAGMA table_info(chats)")
         columns = {row[1] for row in cursor.fetchall()}
-        if "lid" not in columns:
-            return [jid]
-        cursor.execute(
-            "SELECT jid, lid FROM chats WHERE jid = ? OR lid = ?", [jid, jid]
-        )
-        jids: list[str] = []
-        for row in cursor.fetchall():
-            for val in row:
-                if val and val not in jids:
-                    jids.append(val)
-        return jids or [jid]
+        if "lid" in columns:
+            placeholders = ",".join("?" * len(jids))
+            cursor.execute(
+                f"SELECT jid, lid FROM chats WHERE jid IN ({placeholders}) OR lid IN ({placeholders})",
+                jids + jids,
+            )
+            for row in cursor.fetchall():
+                for val in row:
+                    if val and val not in jids:
+                        jids.append(val)
     except sqlite3.Error:
-        return [jid]
+        pass
     finally:
         if "conn" in locals():
             conn.close()  # type: ignore[possibly-undefined]
 
+    return jids
 
-def _fetch_new_messages(db_path: str, chat_jid: str, after: datetime | None, limit: int) -> list[dict]:
+
+def _fetch_new_messages(db_path: str, chat_jid: str, after: datetime | None, limit: int, contact_map: dict | None = None) -> list[dict]:
     """New messages in a chat, from oldest to newest, excluding messages we sent."""
     try:
-        jids = _resolve_jid_variants(db_path, chat_jid)
+        jids = _resolve_jid_variants(db_path, chat_jid, contact_map)
         placeholders = ",".join("?" * len(jids))
         conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=0&cache=private", uri=True)
         cursor = conn.cursor()
@@ -177,10 +204,10 @@ def _fetch_new_messages(db_path: str, chat_jid: str, after: datetime | None, lim
             conn.close()  # type: ignore[possibly-undefined]
 
 
-def _fetch_history(db_path: str, chat_jid: str, before_iso: str, limit: int) -> list[dict]:
+def _fetch_history(db_path: str, chat_jid: str, before_iso: str, limit: int, contact_map: dict | None = None) -> list[dict]:
     """Earlier messages to build the historical context (both directions)."""
     try:
-        jids = _resolve_jid_variants(db_path, chat_jid)
+        jids = _resolve_jid_variants(db_path, chat_jid, contact_map)
         placeholders = ",".join("?" * len(jids))
         conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=0&cache=private", uri=True)
         cursor = conn.cursor()
