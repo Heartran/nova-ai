@@ -345,8 +345,11 @@ async def call_claude(system: str, messages: list[dict], memory_server, read_ser
         # are enough: anything not in the list is rejected by the SDK.
     )
 
+    async def _prompt_stream():
+        yield prompt
+
     output_parts: list[str] = []
-    async for msg in query(prompt=prompt, options=options):
+    async for msg in query(prompt=_prompt_stream(), options=options):
         if isinstance(msg, AssistantMessage):
             for block in msg.content:
                 if isinstance(block, TextBlock):
