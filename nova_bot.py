@@ -1,16 +1,16 @@
 """
-nova_bot.py — Bot Discord che incarna Nova usando Claude.
+nova_bot.py — Discord bot that embodies Nova using Claude.
 
-Trigger su un messaggio quando:
-  - il bot e' menzionato direttamente (@Nova)
-  - il messaggio e' un reply a un messaggio del bot
-  - il messaggio e' un DM al bot
-  - la parola 'nova' compare nel testo (parola intera, case-insensitive)
+Triggers on a message when:
+  - the bot is mentioned directly (@Nova)
+  - the message is a reply to a bot message
+  - the message is a DM to the bot
+  - the word 'nova' appears in the text (whole word, case-insensitive)
 
-Setup necessario:
-  - File .env compilato (copia da .env.example)
-  - Sul Developer Portal Discord: Privileged Gateway Intents -> MESSAGE CONTENT INTENT abilitato
-  - Bot invitato col permesso 'Send Messages' + 'Read Message History' + 'View Channel'
+Required setup:
+  - Filled-in .env file (copy from .env.example)
+  - On the Discord Developer Portal: Privileged Gateway Intents -> MESSAGE CONTENT INTENT enabled
+  - Bot invited with 'Send Messages' + 'Read Message History' + 'View Channel' permissions
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ from dotenv import load_dotenv
 
 from checkpoints import ChannelCheckpoints
 from memory import (
+    bootstrap_memory_dir,
     ensure_scope_skeleton,
     ensure_shared_skeleton,
     load_scope_memory,
@@ -62,25 +63,28 @@ MAX_RESPONSE_CHARS = int(os.getenv("MAX_RESPONSE_CHARS", "1900"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 if not DISCORD_TOKEN:
-    sys.exit("Manca DISCORD_TOKEN in .env")
+    sys.exit("Missing DISCORD_TOKEN in .env")
 if not NOVA_MEMORY_DIR or str(NOVA_MEMORY_DIR) == ".":
-    sys.exit("Manca NOVA_MEMORY_DIR in .env")
+    sys.exit("Missing NOVA_MEMORY_DIR in .env")
 
 logging.basicConfig(
     level=LOG_LEVEL,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%H:%M:%S",
 )
-# Tagliare il rumore: discord.py e claude-agent-sdk sono molto verbosi a INFO/DEBUG.
+# Trim noise: discord.py and claude-agent-sdk are very verbose at INFO/DEBUG.
 logging.getLogger("discord").setLevel(logging.WARNING)
 logging.getLogger("claude_agent_sdk").setLevel(logging.WARNING)
 logger = logging.getLogger("nova")
 
 # -----------------------------------------------------------------------------
-# Setup memoria + checkpoint storage
+# Memory setup + checkpoint storage
 # -----------------------------------------------------------------------------
-# Lo scope (server o DM) viene risolto per ogni messaggio in `on_message`.
-# La cartella radice deve esistere, le sottocartelle nascono lazy.
+# The scope (server or DM) is resolved per message inside `on_message`.
+# The root folder must exist; subfolders are created lazily.
+_MEMORY_TEMPLATE_DIR = Path(__file__).parent / "memory.example"
+if _MEMORY_TEMPLATE_DIR.exists():
+    bootstrap_memory_dir(NOVA_MEMORY_DIR, _MEMORY_TEMPLATE_DIR)
 NOVA_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 ensure_shared_skeleton(NOVA_MEMORY_DIR)
 
@@ -102,7 +106,7 @@ ALL_TOOLS = MEMORY_TOOLS + READ_TOOLS + WEB_TOOLS
 
 
 def _build_can_use_tool(scope_dir: Path, requester: str):
-    """Callback per audit dei web tool. Logga e poi sempre 'allow'."""
+    """Callback for auditing web tools. Logs then always returns 'allow'."""
 
     async def can_use_tool(tool_name: str, tool_input: dict, context):
         if tool_name == "WebFetch":
@@ -117,7 +121,7 @@ def _build_can_use_tool(scope_dir: Path, requester: str):
 
 
 def _resolve_scope(message: discord.Message) -> tuple[str, int, Path]:
-    """Risolve lo scope memoria del messaggio: ('server', guild_id, dir) o ('dm', user_id, dir)."""
+    """Resolve the message's memory scope: ('server', guild_id, dir) or ('dm', user_id, dir)."""
     if message.guild is not None:
         scope_type = "server"
         scope_id = message.guild.id
@@ -131,19 +135,19 @@ def _resolve_scope(message: discord.Message) -> tuple[str, int, Path]:
 # Client setup
 # -----------------------------------------------------------------------------
 intents = discord.Intents.default()
-intents.message_content = True   # serve MESSAGE CONTENT INTENT abilitato sul portale
+intents.message_content = True   # requires MESSAGE CONTENT INTENT enabled on the portal
 intents.messages = True
 intents.guilds = True
-# DM funzionano con default intents; non servono privileged extra.
+# DMs work with default intents; no extra privileged intents needed.
 
 client = discord.Client(intents=intents)
 tree = discord.app_commands.CommandTree(client)
 register_slash_commands(tree, NOVA_MEMORY_DIR, scope_dir_for, ensure_scope_skeleton)
 
-# Cooldown per canale: {channel_id: last_timestamp}
+# Per-channel cooldown: {channel_id: last_timestamp}
 _last_response_at: dict[int, float] = {}
 
-# Regex per la keyword 'nova' come parola intera (case-insensitive)
+# Regex for the 'nova' keyword as a whole word (case-insensitive)
 NOVA_KEYWORD = re.compile(r"\bnova\b", re.IGNORECASE)
 
 
@@ -152,33 +156,33 @@ NOVA_KEYWORD = re.compile(r"\bnova\b", re.IGNORECASE)
 # -----------------------------------------------------------------------------
 async def should_respond(message: discord.Message) -> tuple[bool, str]:
     """
-    Decide se Nova deve rispondere a un messaggio.
+    Decide whether Nova should reply to a message.
 
     Returns:
-        (decisione, motivo) — il motivo serve solo per i log.
+        (decision, reason) — the reason is only used for logging.
     """
     if message.author.bot:
-        return False, "autore e' un bot"
+        return False, "author is a bot"
     if not message.content and not message.attachments:
-        return False, "messaggio vuoto"
+        return False, "empty message"
     if client.user is None:
-        return False, "client.user non ancora pronto"
+        return False, "client.user not ready yet"
 
-    # 1) DM diretto al bot
+    # 1) Direct DM to the bot
     if isinstance(message.channel, discord.DMChannel):
         return True, "DM"
 
-    # 2) Menzione diretta
+    # 2) Direct mention
     if client.user in message.mentions:
         return True, "mention"
 
-    # 3) Reply a un messaggio di Nova
+    # 3) Reply to a Nova message
     if message.reference and message.reference.resolved:
         ref = message.reference.resolved
         if isinstance(ref, discord.Message) and ref.author.id == client.user.id:
             return True, "reply"
 
-    # 3b) Reply ma il msg non e' stato risolto -> fetch
+    # 3b) Reply but the referenced msg wasn't resolved -> fetch it
     if message.reference and not message.reference.resolved and message.reference.message_id:
         try:
             ref = await message.channel.fetch_message(message.reference.message_id)
@@ -187,15 +191,15 @@ async def should_respond(message: discord.Message) -> tuple[bool, str]:
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             pass
 
-    # 4) Keyword 'nova' nel testo
+    # 4) Keyword 'nova' in the text
     if NOVA_KEYWORD.search(message.content):
         return True, "keyword"
 
-    return False, "nessun trigger"
+    return False, "no trigger"
 
 
 def cooldown_ok(channel_id: int) -> bool:
-    """Restituisce True se il canale e' fuori cooldown."""
+    """Return True if the channel is past its cooldown."""
     last = _last_response_at.get(channel_id, 0.0)
     return (time.time() - last) >= CHANNEL_COOLDOWN_SECONDS
 
@@ -210,20 +214,20 @@ async def collect_history(
     limit: int,
 ) -> list[dict]:
     """
-    Legge gli ultimi `limit` messaggi del canale (esclusi quelli senza testo
-    e i comandi di altri bot), li trasforma nel formato Anthropic Messages API,
-    accorpando user/assistant consecutivi.
+    Read the last `limit` messages of the channel (skipping textless ones and
+    other bots' commands), convert them to the Anthropic Messages API format,
+    merging consecutive user/assistant turns.
 
-    L'ultimo elemento della lista e' SEMPRE il messaggio corrente come user.
+    The last item in the list is ALWAYS the current message as a user turn.
     """
     raw: list[discord.Message] = []
     try:
         async for m in channel.history(limit=limit, before=current_message):
             raw.append(m)
     except (discord.Forbidden, discord.HTTPException) as e:
-        logger.warning("Impossibile leggere history del canale: %s", e)
+        logger.warning("Could not read channel history: %s", e)
 
-    raw.reverse()  # cronologico
+    raw.reverse()  # chronological order
 
     msgs: list[dict] = []
 
@@ -242,17 +246,17 @@ async def collect_history(
         if m.author.id == bot_user.id:
             push("assistant", text)
         elif m.author.bot:
-            # altri bot: li ignoriamo per non confondere il modello
+            # other bots: ignored so we don't confuse the model
             continue
         else:
             push("user", f"[{m.author.display_name}]: {text}")
 
-    # Aggiungi messaggio corrente
+    # Add current message
     current_text = current_message.clean_content or ""
     push("user", f"[{current_message.author.display_name}]: {current_text}")
 
-    # Anthropic richiede che il primo messaggio sia 'user'. Se per caso
-    # iniziasse con assistant (raro ma possibile), prependiamo un placeholder.
+    # Anthropic requires the first message to be 'user'. If it happens to
+    # start with assistant (rare but possible), prepend a placeholder.
     if msgs and msgs[0]["role"] != "user":
         msgs.insert(0, {"role": "user", "content": "[contesto precedente]"})
 
@@ -260,10 +264,10 @@ async def collect_history(
 
 
 # -----------------------------------------------------------------------------
-# Splitting per limite Discord
+# Splitting for Discord limit
 # -----------------------------------------------------------------------------
 def split_for_discord(text: str, limit: int = MAX_RESPONSE_CHARS) -> list[str]:
-    """Divide un testo in chunks <= limit, preservando per quanto possibile righe."""
+    """Split text into chunks <= limit, preserving line breaks when possible."""
     text = text.rstrip()
     if len(text) <= limit:
         return [text] if text else []
@@ -277,12 +281,12 @@ def split_for_discord(text: str, limit: int = MAX_RESPONSE_CHARS) -> list[str]:
             current += addition
             continue
 
-        # current pieno -> flush
+        # current is full -> flush
         if current:
             chunks.append(current)
             current = ""
 
-        # se la singola riga e' piu' lunga del limite, spezza brutalmente
+        # if a single line exceeds the limit, split brute-force
         while len(line) > limit:
             chunks.append(line[:limit])
             line = line[limit:]
@@ -294,12 +298,12 @@ def split_for_discord(text: str, limit: int = MAX_RESPONSE_CHARS) -> list[str]:
 
 
 # -----------------------------------------------------------------------------
-# Chiamata Claude (via Claude Agent SDK -> usa il login claude.ai)
+# Claude call (via Claude Agent SDK -> uses the claude.ai login)
 # -----------------------------------------------------------------------------
 def _serialize_history(messages: list[dict]) -> str:
     """
-    Trasforma la lista user/assistant in un singolo prompt testuale.
-    L'ultimo messaggio (sempre user) e' isolato come "messaggio a cui rispondere".
+    Convert the user/assistant list into a single textual prompt.
+    The last message (always a user one) is isolated as the "message to reply to".
     """
     if not messages:
         return ""
@@ -325,7 +329,7 @@ def _serialize_history(messages: list[dict]) -> str:
 
 
 async def call_claude(system: str, messages: list[dict], memory_server, read_server, can_use_tool) -> str:
-    """Chiamata async via claude-agent-sdk con memory_server + read_server scoped + audit dei web tool."""
+    """Async call via claude-agent-sdk with scoped memory_server + read_server + web tool auditing."""
     prompt = _serialize_history(messages)
 
     options = ClaudeAgentOptions(
@@ -333,12 +337,12 @@ async def call_claude(system: str, messages: list[dict], memory_server, read_ser
         model=CLAUDE_MODEL,
         mcp_servers={"nova_memory": memory_server, "nova_read": read_server},
         allowed_tools=ALL_TOOLS,
-        max_turns=8,  # piu' margine: web tool + read tool + risposta finale = vari turn
+        max_turns=8,  # more headroom: web tool + read tool + final answer = several turns
         can_use_tool=can_use_tool,
         setting_sources=[],
-        # NOTE: niente permission_mode="bypassPermissions" — quel mode salta il
-        # callback can_use_tool, perdendo l'audit. allowed_tools + can_use_tool
-        # bastano: tutto cio' che non e' nella lista viene rifiutato dal SDK.
+        # NOTE: no permission_mode="bypassPermissions" — that mode skips the
+        # can_use_tool callback, losing the audit. allowed_tools + can_use_tool
+        # are enough: anything not in the list is rejected by the SDK.
     )
 
     output_parts: list[str] = []
@@ -356,30 +360,30 @@ async def call_claude(system: str, messages: list[dict], memory_server, read_ser
 # -----------------------------------------------------------------------------
 @client.event
 async def on_ready():
-    logger.info("Connessa come %s (id=%s)", client.user, client.user.id if client.user else "?")
-    logger.info("In %d server:", len(client.guilds))
+    logger.info("Connected as %s (id=%s)", client.user, client.user.id if client.user else "?")
+    logger.info("In %d servers:", len(client.guilds))
     for g in client.guilds:
         logger.info("  - %s (id=%s)", g.name, g.id)
-    logger.info("Modello: %s", CLAUDE_MODEL)
-    logger.info("Memoria base: %s", NOVA_MEMORY_DIR)
-    logger.info("Memoria utente (read-only): %s", USER_MEMORY_DIR)
+    logger.info("Model: %s", CLAUDE_MODEL)
+    logger.info("Base memory: %s", NOVA_MEMORY_DIR)
+    logger.info("User memory (read-only): %s", USER_MEMORY_DIR)
 
-    # Sync slash commands per ogni guild (instantaneo, vs ~1h del global sync).
-    # copy_global_to porta i comandi global come guild-scoped per propagazione istantanea.
+    # Sync slash commands per guild (instantaneous, vs ~1h for global sync).
+    # copy_global_to brings global commands as guild-scoped for instant propagation.
     for g in client.guilds:
         try:
             tree.copy_global_to(guild=g)
             synced = await tree.sync(guild=g)
-            logger.info("Slash commands sync su %s: %d comandi", g.name, len(synced))
+            logger.info("Slash commands synced on %s: %d commands", g.name, len(synced))
         except discord.HTTPException as e:
-            logger.error("Sync slash commands fallito su %s: %s", g.name, e)
+            logger.error("Slash command sync failed on %s: %s", g.name, e)
 
-    # Catch-up: leggi i canali tracciati, rispondi all'ULTIMO trigger perso.
+    # Catch-up: read tracked channels, reply to the LAST missed trigger.
     await replay_missed_messages()
 
 
 async def handle_message(message: discord.Message) -> None:
-    """Pipeline completa di risposta. Usata sia da on_message che dal replay al boot."""
+    """Full reply pipeline. Used both by on_message and by the boot replay."""
     try:
         scope_type, scope_id, scope_dir = _resolve_scope(message)
         ensure_scope_skeleton(scope_dir, scope_type)
@@ -405,7 +409,7 @@ async def handle_message(message: discord.Message) -> None:
             reply = await call_claude(system_prompt, messages, memory_server, read_server, audit_cb)
 
         if not reply:
-            logger.warning("Claude ha restituito risposta vuota")
+            logger.warning("Claude returned an empty response")
             return
 
         chunks = split_for_discord(reply, MAX_RESPONSE_CHARS)
@@ -415,11 +419,11 @@ async def handle_message(message: discord.Message) -> None:
             else:
                 await message.channel.send(chunk)
 
-        # Aggiorna checkpoint dopo risposta riuscita
+        # Update checkpoint after a successful reply
         checkpoints.update(message.channel.id, message.created_at, scope_type, scope_id)
 
     except Exception:
-        logger.exception("Errore mentre rispondevo a %s", message.author)
+        logger.exception("Error while replying to %s", message.author)
         try:
             await message.reply(
                 "Si e' rotto qualcosa nel mio cervello. Riprova fra un attimo.",
@@ -436,8 +440,8 @@ async def on_message(message: discord.Message):
 
     decision, reason = await should_respond(message)
 
-    # Aggiorna checkpoint anche se non rispondiamo, ma solo se il canale e' gia'
-    # tracciato — cosi' al replay non ri-leggiamo messaggi gia' visti.
+    # Update the checkpoint even if we don't reply, but only if the channel is
+    # already tracked — so the replay doesn't re-read messages already seen.
     if checkpoints.is_tracked(message.channel.id) and message.author.id != client.user.id:
         scope_type, scope_id, _ = _resolve_scope(message)
         checkpoints.update(message.channel.id, message.created_at, scope_type, scope_id)
@@ -446,7 +450,7 @@ async def on_message(message: discord.Message):
         return
 
     if not cooldown_ok(message.channel.id):
-        logger.debug("Cooldown attivo su channel %s", message.channel.id)
+        logger.debug("Cooldown active on channel %s", message.channel.id)
         return
 
     _last_response_at[message.channel.id] = time.time()
@@ -463,10 +467,10 @@ async def on_message(message: discord.Message):
 
 
 # -----------------------------------------------------------------------------
-# Replay catch-up al boot
+# Boot replay catch-up
 # -----------------------------------------------------------------------------
 async def _resolve_channel_from_checkpoint(channel_id: int):
-    """Risolve un channel a partire dal suo id, gestendo anche i DM."""
+    """Resolve a channel from its id, handling DMs too."""
     channel = client.get_channel(channel_id)
     if channel is not None:
         return channel
@@ -477,13 +481,13 @@ async def _resolve_channel_from_checkpoint(channel_id: int):
             user = await client.fetch_user(int(entry["scope_id"]))
             return user.dm_channel or await user.create_dm()
         except discord.HTTPException as e:
-            logger.warning("Impossibile risolvere DM channel %s: %s", channel_id, e)
+            logger.warning("Could not resolve DM channel %s: %s", channel_id, e)
             return None
 
     try:
         return await client.fetch_channel(channel_id)
     except discord.HTTPException as e:
-        logger.warning("Impossibile risolvere channel %s: %s", channel_id, e)
+        logger.warning("Could not resolve channel %s: %s", channel_id, e)
         return None
 
 
@@ -503,16 +507,16 @@ async def _replay_channel(channel_id: int) -> None:
                 continue
             missed.append(m)
     except discord.HTTPException as e:
-        logger.warning("Errore history channel %s: %s", channel_id, e)
+        logger.warning("History error on channel %s: %s", channel_id, e)
         return
 
     if not missed:
         return
 
     chan_name = getattr(channel, "name", None) or f"DM:{getattr(channel.recipient, 'display_name', '?')}"
-    logger.info("Replay channel '%s' (id=%s): %d messaggi persi", chan_name, channel_id, len(missed))
+    logger.info("Replay channel '%s' (id=%s): %d missed messages", chan_name, channel_id, len(missed))
 
-    # Strategia B: rispondo solo all'ULTIMO messaggio qualificante.
+    # Strategy B: only reply to the LAST qualifying message.
     latest_qualifying: discord.Message | None = None
     for m in missed:
         decision, _ = await should_respond(m)
@@ -521,7 +525,7 @@ async def _replay_channel(channel_id: int) -> None:
 
     if latest_qualifying is not None:
         logger.info(
-            "Replay: rispondo a %s del %s in '%s'",
+            "Replay: replying to %s from %s in '%s'",
             latest_qualifying.author.display_name,
             latest_qualifying.created_at,
             chan_name,
@@ -529,9 +533,9 @@ async def _replay_channel(channel_id: int) -> None:
         _last_response_at[channel_id] = time.time()
         await handle_message(latest_qualifying)
     else:
-        logger.info("Replay '%s': nessun trigger nei %d messaggi", chan_name, len(missed))
+        logger.info("Replay '%s': no trigger in %d messages", chan_name, len(missed))
 
-    # Avanza checkpoint all'ultimo messaggio visto, qualificante o no
+    # Advance the checkpoint to the last seen message, qualifying or not
     last_msg = missed[-1]
     scope_type, scope_id, _ = _resolve_scope(last_msg)
     checkpoints.update(channel_id, last_msg.created_at, scope_type, scope_id)
@@ -540,15 +544,15 @@ async def _replay_channel(channel_id: int) -> None:
 async def replay_missed_messages() -> None:
     ids = checkpoints.channel_ids()
     if not ids:
-        logger.info("Nessun checkpoint, niente replay")
+        logger.info("No checkpoints, skipping replay")
         return
 
-    logger.info("Replay catch-up su %d canali tracciati", len(ids))
+    logger.info("Replay catch-up on %d tracked channels", len(ids))
     for cid in ids:
         try:
             await _replay_channel(cid)
         except Exception:
-            logger.exception("Errore durante replay su channel %s", cid)
+            logger.exception("Error during replay on channel %s", cid)
 
 
 # -----------------------------------------------------------------------------
@@ -558,7 +562,7 @@ def main():
     try:
         client.run(DISCORD_TOKEN, log_handler=None)
     except discord.LoginFailure:
-        sys.exit("Login Discord fallito: token errato in .env")
+        sys.exit("Discord login failed: invalid token in .env")
 
 
 if __name__ == "__main__":
