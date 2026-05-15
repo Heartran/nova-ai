@@ -138,8 +138,8 @@ def _fetch_new_messages(db_path: str, chat_jid: str, after: datetime | None, lim
         params: list = list(jids)
         after_clause = ""
         if after is not None:
-            after_clause = "AND m.timestamp > ?"
-            params.append(after.isoformat())
+            after_clause = "AND CAST(strftime('%s', m.timestamp) AS INTEGER) > ?"
+            params.append(int(after.timestamp()))
         cursor.execute(
             f"""
             SELECT m.id, m.timestamp, m.sender, m.content, m.is_from_me,
@@ -193,7 +193,8 @@ def _fetch_history(db_path: str, chat_jid: str, before_iso: str, limit: int) -> 
                        m.chat_jid
                    ) as chat_name
             FROM messages m
-            WHERE m.chat_jid IN ({placeholders}) AND m.timestamp < ?
+            WHERE m.chat_jid IN ({placeholders})
+              AND CAST(strftime('%s', m.timestamp) AS INTEGER) < CAST(strftime('%s', ?) AS INTEGER)
               AND m.content IS NOT NULL AND m.content != ''
             ORDER BY m.timestamp DESC
             LIMIT ?
