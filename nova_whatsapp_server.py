@@ -62,6 +62,7 @@ from nova_whatsapp import (
     _fetch_tail,
     _resolve_jid_variants,
     _send_via_bridge,
+    _serialize_history_wa,
 )
 from personality import build_system_prompt
 
@@ -593,7 +594,17 @@ def _cmd_notify(args: list[str], config: WatchConfig, api_url: str) -> None:
 
 
 def _cmd_fetch(args: list[str], config: WatchConfig, checkpoints: WhatsappCheckpoints, db_path: str, api_url: str) -> None:
-    """Read the current conversation and respond if the last message is unanswered."""
+    """Read the current conversation and respond if the last message is unanswered.
+
+    Usage:
+      fetch [jid|n]          — reply only if last message is unanswered
+      fetch [jid|n] force    — always reply, ignoring the already-replied check
+    """
+    force = False
+    if args and args[-1].lower() == "force":
+        force = True
+        args = args[:-1]
+
     if args:
         jid = _resolve_jid(" ".join(args), config, db_path)
         if jid is None:
@@ -622,9 +633,11 @@ def _cmd_fetch(args: list[str], config: WatchConfig, checkpoints: WhatsappCheckp
                 continue
 
             already_replied = any(m["is_from_me"] for m in tail[last_inbound_idx + 1:])
-            if already_replied:
-                print(_c(DIM, f"[{name}] Already replied — nothing to do."))
+            if already_replied and not force:
+                print(_c(DIM, f"[{name}] Already replied — nothing to do. (use 'fetch {jid} force' to reply anyway)"))
                 continue
+            if already_replied and force:
+                print(_c(YELLOW, f"[{name}] Forcing reply despite detected prior response."))
 
             # Build context: history before the last inbound + unanswered messages
             unanswered = [m for m in tail[last_inbound_idx:] if not m["is_from_me"]]
@@ -690,10 +703,55 @@ def _cmd_debug(args: list[str], db_path: str, checkpoints: WhatsappCheckpoints) 
         print(f"  Last {len(rows)} messages (raw timestamp format):")
         for r in rows:
             print(f"    id={r[0]}  ts={_c(CYAN, str(r[1]))}  sender={r[2]}")
-            print(f"    content: {str(r[3])[:80]}")
+            content_str = str(r[3]) if r[3] is not None else "(null)"
+            print(f"    content ({len(content_str)} chars): {content_str[:300]}")
+            if len(content_str) > 300:
+                print(f"    ... (+{len(content_str) - 300} more chars)")
     except sqlite3.Error as e:
         print(_c(RED, f"  DB error: {e}"))
     print()
+
+
+def _cmd_context(args: list[str], config: WatchConfig, db_path: str) -> None:
+    """Show the exact prompt that would be sent to Claude for a given chat."""
+    if args:
+        jid = _resolve_jid(" ".join(args), config, db_path)
+        if jid is None:
+            return
+    else:
+        watched = config.watched_jids
+        if not watched:
+            print(_c(YELLOW, "No chats monitored. Use 'watch' first or pass a JID."))
+            return
+        jid = watched[0]
+
+    async def _run() -> None:
+        name = next((c["name"] for c in _last_chats if c["jid"] == jid), jid)
+        tail = await asyncio.to_thread(_fetch_tail, db_path, jid, 40, _CONTACT_MAP)
+        if not tail:
+            print(_c(YELLOW, f"[{name}] No messages in DB."))
+            return
+
+        last_inbound_idx = max(
+            (i for i, m in enumerate(tail) if not m["is_from_me"]), default=None
+        )
+        if last_inbound_idx is None:
+            print(_c(YELLOW, f"[{name}] No inbound messages found."))
+            return
+
+        unanswered = [m for m in tail[last_inbound_idx:] if not m["is_from_me"]]
+        history = tail[:last_inbound_idx]
+        messages = _build_messages_for_claude(history, unanswered)
+        prompt = _serialize_history_wa(messages)
+
+        print(f"\n{_c(BOLD, f'[{name}] Context that would be sent to Claude:')}")
+        print(f"{_c(DIM, '─' * 60)}")
+        print(f"  Messages in context: {len(messages)} turns ({len(tail)} messages fetched)")
+        print(f"  Prompt length: {len(prompt)} chars\n")
+        print(prompt)
+        print(f"{_c(DIM, '─' * 60)}\n")
+
+    asyncio.get_event_loop().create_task(_run())
 
 
 def _cmd_help() -> None:
@@ -707,6 +765,9 @@ def _cmd_help() -> None:
   {_c(CYAN, "status")}             Show server, bridge and config status
   {_c(CYAN, "interval <n>")}       Change the polling interval (seconds)
   {_c(CYAN, "notify [jid|n]")}     Send a "Nova is listening" notice (all chats or one)
+  {_c(CYAN, "fetch [jid|n]")}      Read current chat and reply if last message is unanswered
+  {_c(CYAN, "context [jid|n]")}    Show the exact prompt Claude would receive for a chat
+  {_c(CYAN, "debug <jid>")}        Raw DB inspection for a specific JID
   {_c(CYAN, "help")}               Show this help
   {_c(CYAN, "quit")} / {_c(CYAN, "exit")}        Stop the server
 
@@ -754,6 +815,8 @@ async def _command_loop(
             _cmd_help()
         elif cmd == "fetch":
             _cmd_fetch(args, config, checkpoints, db_path, api_url)
+        elif cmd == "context":
+            _cmd_context(args, config, db_path)
         elif cmd == "debug":
             _cmd_debug(args, db_path, checkpoints)
         else:
