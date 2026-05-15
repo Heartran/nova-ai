@@ -103,12 +103,39 @@ class WhatsappCheckpoints:
 # SQLite access (run in a thread to avoid blocking the event loop)
 # ---------------------------------------------------------------------------
 
+def _resolve_jid_variants(db_path: str, jid: str) -> list[str]:
+    """Return all JIDs (phone + LID) linked to the same contact in the bridge DB."""
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=0&cache=private", uri=True)
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(chats)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if "lid" not in columns:
+            return [jid]
+        cursor.execute(
+            "SELECT jid, lid FROM chats WHERE jid = ? OR lid = ?", [jid, jid]
+        )
+        jids: list[str] = []
+        for row in cursor.fetchall():
+            for val in row:
+                if val and val not in jids:
+                    jids.append(val)
+        return jids or [jid]
+    except sqlite3.Error:
+        return [jid]
+    finally:
+        if "conn" in locals():
+            conn.close()  # type: ignore[possibly-undefined]
+
+
 def _fetch_new_messages(db_path: str, chat_jid: str, after: datetime | None, limit: int) -> list[dict]:
     """New messages in a chat, from oldest to newest, excluding messages we sent."""
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        jids = _resolve_jid_variants(db_path, chat_jid)
+        placeholders = ",".join("?" * len(jids))
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=0&cache=private", uri=True)
         cursor = conn.cursor()
-        params: list = [chat_jid]
+        params: list = list(jids)
         after_clause = ""
         if after is not None:
             after_clause = "AND m.timestamp > ?"
@@ -118,7 +145,7 @@ def _fetch_new_messages(db_path: str, chat_jid: str, after: datetime | None, lim
             SELECT m.id, m.timestamp, m.sender, m.content, m.is_from_me, c.name
             FROM messages m
             JOIN chats c ON m.chat_jid = c.jid
-            WHERE m.chat_jid = ? {after_clause}
+            WHERE m.chat_jid IN ({placeholders}) {after_clause}
               AND m.is_from_me = 0
               AND m.content IS NOT NULL AND m.content != ''
             ORDER BY m.timestamp ASC
@@ -149,19 +176,21 @@ def _fetch_new_messages(db_path: str, chat_jid: str, after: datetime | None, lim
 def _fetch_history(db_path: str, chat_jid: str, before_iso: str, limit: int) -> list[dict]:
     """Earlier messages to build the historical context (both directions)."""
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        jids = _resolve_jid_variants(db_path, chat_jid)
+        placeholders = ",".join("?" * len(jids))
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=0&cache=private", uri=True)
         cursor = conn.cursor()
         cursor.execute(
-            """
+            f"""
             SELECT m.id, m.timestamp, m.sender, m.content, m.is_from_me, c.name
             FROM messages m
             JOIN chats c ON m.chat_jid = c.jid
-            WHERE m.chat_jid = ? AND m.timestamp < ?
+            WHERE m.chat_jid IN ({placeholders}) AND m.timestamp < ?
               AND m.content IS NOT NULL AND m.content != ''
             ORDER BY m.timestamp DESC
             LIMIT ?
             """,
-            [chat_jid, before_iso, limit],
+            list(jids) + [before_iso, limit],
         )
         rows = cursor.fetchall()
         rows.reverse()  # reorder chronologically

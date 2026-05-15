@@ -59,6 +59,7 @@ from nova_whatsapp import (
     _call_claude_wa,
     _fetch_history,
     _fetch_new_messages,
+    _resolve_jid_variants,
     _send_via_bridge,
 )
 from personality import build_system_prompt
@@ -241,7 +242,13 @@ async def _poll_one(
         latest_ts = datetime.now(timezone.utc)
     checkpoints.update(jid, latest_ts)
 
-    scope_dir = scope_dir_for(NOVA_MEMORY_DIR, "whatsapp", jid)
+    # Prefer the JID variant that already has a memory folder (LID migration).
+    jid_variants = await asyncio.to_thread(_resolve_jid_variants, db_path, jid)
+    scope_jid = next(
+        (v for v in jid_variants if scope_dir_for(NOVA_MEMORY_DIR, "whatsapp", v).exists()),
+        jid,
+    )
+    scope_dir = scope_dir_for(NOVA_MEMORY_DIR, "whatsapp", scope_jid)
     ensure_scope_skeleton(scope_dir, "whatsapp")
     scope_mem = load_scope_memory(scope_dir)
     shared_mem = load_shared_memory(NOVA_MEMORY_DIR)
@@ -296,18 +303,18 @@ def _print_log(msg: str) -> None:
 def _list_chats_from_db(db_path: str, query_str: str = "", limit: int = 30) -> list[dict]:
     """Read available chats from the bridge DB."""
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=0&cache=private", uri=True)
         cursor = conn.cursor()
         search = f"%{query_str}%" if query_str else "%"
         cursor.execute(
             """
             SELECT c.jid, c.name, c.last_message_time,
-                   m.content as last_msg
+                   (SELECT content FROM messages
+                    WHERE chat_jid = c.jid
+                    ORDER BY timestamp DESC LIMIT 1) as last_msg
             FROM chats c
-            LEFT JOIN messages m ON c.jid = m.chat_jid
-                AND c.last_message_time = m.timestamp
             WHERE (c.name LIKE ? OR c.jid LIKE ?)
-            ORDER BY c.last_message_time DESC NULLS LAST
+            ORDER BY COALESCE(c.last_message_time, 0) DESC
             LIMIT ?
             """,
             [search, search, limit],
@@ -420,7 +427,7 @@ def _cmd_unwatch(args: list[str], config: WatchConfig, db_path: str) -> None:
         print(_c(YELLOW, f"'{name}' was not being monitored."))
 
 
-def _cmd_list(config: WatchConfig) -> None:
+def _cmd_list(config: WatchConfig, db_path: str) -> None:
     jids = config.watched_jids
     if not jids:
         print(_c(YELLOW, "No chats monitored. Use 'watch <jid>' to add one."))
@@ -428,6 +435,9 @@ def _cmd_list(config: WatchConfig) -> None:
     print()
     for i, jid in enumerate(jids, 1):
         name = next((c["name"] for c in _last_chats if c["jid"] == jid), "")
+        if not name and db_path and Path(db_path).is_file():
+            results = _list_chats_from_db(db_path, jid, limit=1)
+            name = results[0]["name"] if results else ""
         label = f"{_c(BOLD, name)}  " if name else ""
         print(f"  {_c(GREEN, str(i).rjust(2))}. {label}{_c(DIM, jid)}")
     print()
@@ -564,7 +574,7 @@ async def _command_loop(
         elif cmd == "unwatch":
             _cmd_unwatch(args, config, db_path)
         elif cmd == "list":
-            _cmd_list(config)
+            _cmd_list(config, db_path)
         elif cmd == "status":
             _cmd_status(config, db_path, api_url)
         elif cmd == "interval":
