@@ -7,3 +7,6 @@ venv/
 .DS_Store
 *.log
 *.code-workspace
+
+# Claude Code — impostazioni locali (permessi per-utente, non committare)
+.claude/settings.local.json
