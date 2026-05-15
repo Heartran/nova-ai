@@ -142,9 +142,13 @@ def _fetch_new_messages(db_path: str, chat_jid: str, after: datetime | None, lim
             params.append(after.isoformat())
         cursor.execute(
             f"""
-            SELECT m.id, m.timestamp, m.sender, m.content, m.is_from_me, c.name
+            SELECT m.id, m.timestamp, m.sender, m.content, m.is_from_me,
+                   COALESCE(
+                       (SELECT name FROM chats WHERE jid = m.chat_jid),
+                       (SELECT name FROM chats WHERE lid = m.chat_jid),
+                       m.chat_jid
+                   ) as chat_name
             FROM messages m
-            JOIN chats c ON m.chat_jid = c.jid
             WHERE m.chat_jid IN ({placeholders}) {after_clause}
               AND m.is_from_me = 0
               AND m.content IS NOT NULL AND m.content != ''
@@ -182,9 +186,13 @@ def _fetch_history(db_path: str, chat_jid: str, before_iso: str, limit: int) -> 
         cursor = conn.cursor()
         cursor.execute(
             f"""
-            SELECT m.id, m.timestamp, m.sender, m.content, m.is_from_me, c.name
+            SELECT m.id, m.timestamp, m.sender, m.content, m.is_from_me,
+                   COALESCE(
+                       (SELECT name FROM chats WHERE jid = m.chat_jid),
+                       (SELECT name FROM chats WHERE lid = m.chat_jid),
+                       m.chat_jid
+                   ) as chat_name
             FROM messages m
-            JOIN chats c ON m.chat_jid = c.jid
             WHERE m.chat_jid IN ({placeholders}) AND m.timestamp < ?
               AND m.content IS NOT NULL AND m.content != ''
             ORDER BY m.timestamp DESC

@@ -527,6 +527,35 @@ def _cmd_notify(args: list[str], config: WatchConfig, api_url: str) -> None:
             print(_c(RED, f"Send failed for {_c(BOLD, name)} ({jid})"))
 
 
+def _cmd_debug(args: list[str], db_path: str, checkpoints: WhatsappCheckpoints) -> None:
+    """Show raw DB state for a JID to diagnose polling issues."""
+    if not args:
+        print(_c(YELLOW, "Usage: debug <jid>"))
+        return
+    jid = " ".join(args)
+    checkpoint = checkpoints.get(jid)
+    print(f"\n  Checkpoint:  {checkpoint.isoformat() if checkpoint else _c(YELLOW, 'None (first run)')}")
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=0&cache=private", uri=True)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, timestamp, sender, content FROM messages WHERE chat_jid = ? ORDER BY rowid DESC LIMIT 3",
+            [jid],
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        if not rows:
+            print(_c(YELLOW, f"  No messages found for {jid}"))
+            return
+        print(f"  Last {len(rows)} messages (raw timestamp format):")
+        for r in rows:
+            print(f"    id={r[0]}  ts={_c(CYAN, str(r[1]))}  sender={r[2]}")
+            print(f"    content: {str(r[3])[:80]}")
+    except sqlite3.Error as e:
+        print(_c(RED, f"  DB error: {e}"))
+    print()
+
+
 def _cmd_help() -> None:
     print(f"""
 {_c(BOLD, "Available commands:")}
@@ -583,6 +612,8 @@ async def _command_loop(
             _cmd_notify(args, config, api_url)
         elif cmd in ("help", "?", "h"):
             _cmd_help()
+        elif cmd == "debug":
+            _cmd_debug(args, db_path, checkpoints)
         else:
             print(_c(YELLOW, f"Unknown command: '{cmd}'. Type 'help' for the list."))
 
