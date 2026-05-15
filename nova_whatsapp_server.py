@@ -28,7 +28,7 @@ import os
 import signal
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
 
@@ -59,7 +59,10 @@ from nova_whatsapp import (
     _call_claude_wa,
     _fetch_history,
     _fetch_new_messages,
+    _fetch_tail,
+    _resolve_jid_variants,
     _send_via_bridge,
+    _serialize_history_wa,
 )
 from personality import build_system_prompt
 
@@ -79,8 +82,65 @@ DEFAULT_BRIDGE_DB = str(
 DEFAULT_API_URL = os.getenv("WHATSAPP_API_URL", "http://localhost:8080/api").strip()
 DEFAULT_POLL_INTERVAL = float(os.getenv("WHATSAPP_POLL_INTERVAL", "5"))
 DEFAULT_HISTORY_LIMIT = int(os.getenv("WHATSAPP_HISTORY_LIMIT", "20"))
+_CONTACT_MAP_PATH = Path(os.getenv("WHATSAPP_CONTACT_MAP", "")).expanduser() if os.getenv("WHATSAPP_CONTACT_MAP") else None
 
 CONFIG_FILE = NOVA_MEMORY_DIR / "whatsapp_config.json"
+
+# ---------------------------------------------------------------------------
+# Contact map (optional, loaded from WHATSAPP_CONTACT_MAP env path)
+# ---------------------------------------------------------------------------
+
+def _load_contact_map(path: Path | None) -> dict:
+    if not path or not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+_CONTACT_MAP: dict = _load_contact_map(_CONTACT_MAP_PATH)
+
+
+def _contact_map_jid_variants(jid: str) -> list[str]:
+    """Return phone↔LID variants for a JID from the contact map."""
+    if not _CONTACT_MAP:
+        return [jid]
+    jids = [jid]
+    for entry in _CONTACT_MAP.values():
+        if not isinstance(entry, dict):
+            continue
+        related = {
+            entry.get("chat_jid"),
+            entry.get("lid"),
+            entry.get("legacy_phone_jid"),
+            *(f"{p}@s.whatsapp.net" for p in entry.get("phone_numbers", [])),
+        } - {None}
+        if jid in related:
+            for v in related:
+                if v and v not in jids:
+                    jids.append(v)
+    return jids
+
+
+def _contact_map_resolve_name(name: str) -> str | None:
+    """Look up a contact by name substring in the contact map; return chat_jid."""
+    if not _CONTACT_MAP:
+        return None
+    nl = name.lower()
+    matches = []
+    for key, entry in _CONTACT_MAP.items():
+        if not isinstance(entry, dict):
+            continue
+        entry_name = entry.get("name", key)
+        nicknames = entry.get("nicknames", [])
+        if nl in entry_name.lower() or any(nl in n.lower() for n in nicknames):
+            jid = entry.get("chat_jid") or entry.get("lid")
+            if jid and jid not in matches:
+                matches.append(jid)
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Minimal ANSI colors (zero extra dependencies)
@@ -219,16 +279,19 @@ async def _poll_one(
     config: WatchConfig,
     db_path: str,
     api_url: str,
+    force: bool = False,
 ) -> None:
     last_seen = checkpoints.get(jid)
 
     # First time we see this JID: set "now" as the starting point and do not
-    # reply to messages already in the DB.
+    # reply to messages already in the DB (unless forced).
     if last_seen is None:
-        checkpoints.update(jid, datetime.now(timezone.utc))
-        return
+        if not force:
+            checkpoints.update(jid, datetime.now(timezone.utc))
+            return
+        last_seen = datetime.now(timezone.utc) - timedelta(hours=24)
 
-    new_msgs = await asyncio.to_thread(_fetch_new_messages, db_path, jid, last_seen, 50)
+    new_msgs = await asyncio.to_thread(_fetch_new_messages, db_path, jid, last_seen, 50, _CONTACT_MAP)
     if not new_msgs:
         return
 
@@ -241,14 +304,20 @@ async def _poll_one(
         latest_ts = datetime.now(timezone.utc)
     checkpoints.update(jid, latest_ts)
 
-    scope_dir = scope_dir_for(NOVA_MEMORY_DIR, "whatsapp", jid)
+    # Prefer the JID variant that already has a memory folder (LID migration).
+    jid_variants = await asyncio.to_thread(_resolve_jid_variants, db_path, jid, _CONTACT_MAP)
+    scope_jid = next(
+        (v for v in jid_variants if scope_dir_for(NOVA_MEMORY_DIR, "whatsapp", v).exists()),
+        jid,
+    )
+    scope_dir = scope_dir_for(NOVA_MEMORY_DIR, "whatsapp", scope_jid)
     ensure_scope_skeleton(scope_dir, "whatsapp")
     scope_mem = load_scope_memory(scope_dir)
     shared_mem = load_shared_memory(NOVA_MEMORY_DIR)
     user_mem = load_user_memory(USER_MEMORY_DIR) if USER_MEMORY_DIR.exists() else ""
 
     history = await asyncio.to_thread(
-        _fetch_history, db_path, jid, new_msgs[0]["timestamp"], config.history_limit
+        _fetch_history, db_path, jid, new_msgs[0]["timestamp"], config.history_limit, _CONTACT_MAP
     )
     messages = _build_messages_for_claude(history, new_msgs)
     chat_name = new_msgs[0].get("chat_name") or jid
@@ -296,18 +365,18 @@ def _print_log(msg: str) -> None:
 def _list_chats_from_db(db_path: str, query_str: str = "", limit: int = 30) -> list[dict]:
     """Read available chats from the bridge DB."""
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=0&cache=private", uri=True)
         cursor = conn.cursor()
         search = f"%{query_str}%" if query_str else "%"
         cursor.execute(
             """
             SELECT c.jid, c.name, c.last_message_time,
-                   m.content as last_msg
+                   (SELECT content FROM messages
+                    WHERE chat_jid = c.jid
+                    ORDER BY timestamp DESC LIMIT 1) as last_msg
             FROM chats c
-            LEFT JOIN messages m ON c.jid = m.chat_jid
-                AND c.last_message_time = m.timestamp
             WHERE (c.name LIKE ? OR c.jid LIKE ?)
-            ORDER BY c.last_message_time DESC NULLS LAST
+            ORDER BY COALESCE(c.last_message_time, 0) DESC
             LIMIT ?
             """,
             [search, search, limit],
@@ -347,7 +416,11 @@ def _resolve_jid(arg: str, config: WatchConfig, db_path: str) -> str | None:
     if "@" in arg:
         return arg
 
-    # Name substring: search the last loaded chats or the DB
+    # Name substring: contact map first (authoritative phone↔LID), then cached list
+    contact_jid = _contact_map_resolve_name(arg)
+    if contact_jid:
+        return contact_jid
+
     candidates = [c for c in _last_chats if arg.lower() in c["name"].lower()]
     if len(candidates) == 1:
         return candidates[0]["jid"]
@@ -420,7 +493,7 @@ def _cmd_unwatch(args: list[str], config: WatchConfig, db_path: str) -> None:
         print(_c(YELLOW, f"'{name}' was not being monitored."))
 
 
-def _cmd_list(config: WatchConfig) -> None:
+def _cmd_list(config: WatchConfig, db_path: str) -> None:
     jids = config.watched_jids
     if not jids:
         print(_c(YELLOW, "No chats monitored. Use 'watch <jid>' to add one."))
@@ -428,6 +501,9 @@ def _cmd_list(config: WatchConfig) -> None:
     print()
     for i, jid in enumerate(jids, 1):
         name = next((c["name"] for c in _last_chats if c["jid"] == jid), "")
+        if not name and db_path and Path(db_path).is_file():
+            results = _list_chats_from_db(db_path, jid, limit=1)
+            name = results[0]["name"] if results else ""
         label = f"{_c(BOLD, name)}  " if name else ""
         print(f"  {_c(GREEN, str(i).rjust(2))}. {label}{_c(DIM, jid)}")
     print()
@@ -517,6 +593,167 @@ def _cmd_notify(args: list[str], config: WatchConfig, api_url: str) -> None:
             print(_c(RED, f"Send failed for {_c(BOLD, name)} ({jid})"))
 
 
+def _cmd_fetch(args: list[str], config: WatchConfig, checkpoints: WhatsappCheckpoints, db_path: str, api_url: str) -> None:
+    """Read the current conversation and respond if the last message is unanswered.
+
+    Usage:
+      fetch [jid|n]          — reply only if last message is unanswered
+      fetch [jid|n] force    — always reply, ignoring the already-replied check
+    """
+    force = False
+    if args and args[-1].lower() == "force":
+        force = True
+        args = args[:-1]
+
+    if args:
+        jid = _resolve_jid(" ".join(args), config, db_path)
+        if jid is None:
+            return
+        targets = [jid]
+    else:
+        targets = list(config.watched_jids)
+        if not targets:
+            print(_c(YELLOW, "No chats monitored."))
+            return
+
+    async def _run() -> None:
+        for jid in targets:
+            name = next((c["name"] for c in _last_chats if c["jid"] == jid), jid)
+            tail = await asyncio.to_thread(_fetch_tail, db_path, jid, 40, _CONTACT_MAP)
+            if not tail:
+                print(_c(YELLOW, f"[{name}] No messages found."))
+                continue
+
+            # Find the last inbound message and check if Nova already replied after it
+            last_inbound_idx = max(
+                (i for i, m in enumerate(tail) if not m["is_from_me"]), default=None
+            )
+            if last_inbound_idx is None:
+                print(_c(YELLOW, f"[{name}] No inbound messages found."))
+                continue
+
+            already_replied = any(m["is_from_me"] for m in tail[last_inbound_idx + 1:])
+            if already_replied and not force:
+                print(_c(DIM, f"[{name}] Already replied — nothing to do. (use 'fetch {jid} force' to reply anyway)"))
+                continue
+            if already_replied and force:
+                print(_c(YELLOW, f"[{name}] Forcing reply despite detected prior response."))
+
+            # Build context: history before the last inbound + unanswered messages
+            unanswered = [m for m in tail[last_inbound_idx:] if not m["is_from_me"]]
+            history = tail[:last_inbound_idx]
+            messages = _build_messages_for_claude(history, unanswered)
+
+            jid_variants = await asyncio.to_thread(_resolve_jid_variants, db_path, jid, _CONTACT_MAP)
+            scope_jid = next(
+                (v for v in jid_variants if scope_dir_for(NOVA_MEMORY_DIR, "whatsapp", v).exists()),
+                jid,
+            )
+            scope_dir = scope_dir_for(NOVA_MEMORY_DIR, "whatsapp", scope_jid)
+            ensure_scope_skeleton(scope_dir, "whatsapp")
+            scope_mem = load_scope_memory(scope_dir)
+            shared_mem = load_shared_memory(NOVA_MEMORY_DIR)
+            user_mem = load_user_memory(USER_MEMORY_DIR) if USER_MEMORY_DIR.exists() else ""
+            memory_server = build_memory_server(scope_dir)
+
+            system_prompt = build_system_prompt(shared_mem, scope_mem, user_mem, bot_display_name="Nova")
+
+            _print_log(_c(CYAN, f"[{name}] Fetching — generating reply..."))
+            reply = await _call_claude_wa(system_prompt, messages, memory_server, CLAUDE_MODEL)
+            if not reply:
+                _print_log(_c(YELLOW, f"[{name}] Empty response from Claude."))
+                continue
+
+            ok = await asyncio.to_thread(_send_via_bridge, api_url, jid, reply)
+            status = _c(GREEN, "OK") if ok else _c(RED, "FAIL")
+            _print_log(f"{status} [{name}] Reply sent ({len(reply)} chars)")
+
+            # Advance checkpoint so the poller doesn't re-trigger
+            try:
+                latest_ts = datetime.fromisoformat(unanswered[-1]["timestamp"])
+                if latest_ts.tzinfo is None:
+                    latest_ts = latest_ts.replace(tzinfo=timezone.utc)
+            except ValueError:
+                latest_ts = datetime.now(timezone.utc)
+            checkpoints.update(jid, latest_ts)
+
+    asyncio.get_event_loop().create_task(_run())
+
+
+def _cmd_debug(args: list[str], db_path: str, checkpoints: WhatsappCheckpoints) -> None:
+    """Show raw DB state for a JID to diagnose polling issues."""
+    if not args:
+        print(_c(YELLOW, "Usage: debug <jid>"))
+        return
+    jid = " ".join(args)
+    checkpoint = checkpoints.get(jid)
+    print(f"\n  Checkpoint:  {checkpoint.isoformat() if checkpoint else _c(YELLOW, 'None (first run)')}")
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=0&cache=private", uri=True)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, timestamp, sender, content FROM messages WHERE chat_jid = ? ORDER BY rowid DESC LIMIT 3",
+            [jid],
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        if not rows:
+            print(_c(YELLOW, f"  No messages found for {jid}"))
+            return
+        print(f"  Last {len(rows)} messages (raw timestamp format):")
+        for r in rows:
+            print(f"    id={r[0]}  ts={_c(CYAN, str(r[1]))}  sender={r[2]}")
+            content_str = str(r[3]) if r[3] is not None else "(null)"
+            print(f"    content ({len(content_str)} chars): {content_str[:300]}")
+            if len(content_str) > 300:
+                print(f"    ... (+{len(content_str) - 300} more chars)")
+    except sqlite3.Error as e:
+        print(_c(RED, f"  DB error: {e}"))
+    print()
+
+
+def _cmd_context(args: list[str], config: WatchConfig, db_path: str) -> None:
+    """Show the exact prompt that would be sent to Claude for a given chat."""
+    if args:
+        jid = _resolve_jid(" ".join(args), config, db_path)
+        if jid is None:
+            return
+    else:
+        watched = config.watched_jids
+        if not watched:
+            print(_c(YELLOW, "No chats monitored. Use 'watch' first or pass a JID."))
+            return
+        jid = watched[0]
+
+    async def _run() -> None:
+        name = next((c["name"] for c in _last_chats if c["jid"] == jid), jid)
+        tail = await asyncio.to_thread(_fetch_tail, db_path, jid, 40, _CONTACT_MAP)
+        if not tail:
+            print(_c(YELLOW, f"[{name}] No messages in DB."))
+            return
+
+        last_inbound_idx = max(
+            (i for i, m in enumerate(tail) if not m["is_from_me"]), default=None
+        )
+        if last_inbound_idx is None:
+            print(_c(YELLOW, f"[{name}] No inbound messages found."))
+            return
+
+        unanswered = [m for m in tail[last_inbound_idx:] if not m["is_from_me"]]
+        history = tail[:last_inbound_idx]
+        messages = _build_messages_for_claude(history, unanswered)
+        prompt = _serialize_history_wa(messages)
+
+        print(f"\n{_c(BOLD, f'[{name}] Context that would be sent to Claude:')}")
+        print(f"{_c(DIM, '─' * 60)}")
+        print(f"  Messages in context: {len(messages)} turns ({len(tail)} messages fetched)")
+        print(f"  Prompt length: {len(prompt)} chars\n")
+        print(prompt)
+        print(f"{_c(DIM, '─' * 60)}\n")
+
+    asyncio.get_event_loop().create_task(_run())
+
+
 def _cmd_help() -> None:
     print(f"""
 {_c(BOLD, "Available commands:")}
@@ -528,6 +765,9 @@ def _cmd_help() -> None:
   {_c(CYAN, "status")}             Show server, bridge and config status
   {_c(CYAN, "interval <n>")}       Change the polling interval (seconds)
   {_c(CYAN, "notify [jid|n]")}     Send a "Nova is listening" notice (all chats or one)
+  {_c(CYAN, "fetch [jid|n]")}      Read current chat and reply if last message is unanswered
+  {_c(CYAN, "context [jid|n]")}    Show the exact prompt Claude would receive for a chat
+  {_c(CYAN, "debug <jid>")}        Raw DB inspection for a specific JID
   {_c(CYAN, "help")}               Show this help
   {_c(CYAN, "quit")} / {_c(CYAN, "exit")}        Stop the server
 
@@ -564,7 +804,7 @@ async def _command_loop(
         elif cmd == "unwatch":
             _cmd_unwatch(args, config, db_path)
         elif cmd == "list":
-            _cmd_list(config)
+            _cmd_list(config, db_path)
         elif cmd == "status":
             _cmd_status(config, db_path, api_url)
         elif cmd == "interval":
@@ -573,6 +813,12 @@ async def _command_loop(
             _cmd_notify(args, config, api_url)
         elif cmd in ("help", "?", "h"):
             _cmd_help()
+        elif cmd == "fetch":
+            _cmd_fetch(args, config, checkpoints, db_path, api_url)
+        elif cmd == "context":
+            _cmd_context(args, config, db_path)
+        elif cmd == "debug":
+            _cmd_debug(args, db_path, checkpoints)
         else:
             print(_c(YELLOW, f"Unknown command: '{cmd}'. Type 'help' for the list."))
 
