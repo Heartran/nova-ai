@@ -1,0 +1,122 @@
+# =============================================================================
+# Claude Code — review automatico delle PR
+# -----------------------------------------------------------------------------
+# Gira AUTOMATICAMENTE su ogni PR aperta/aggiornata, senza bisogno di
+# mention. Pubblica commenti di review focalizzati su Turni-di-Palco:
+#   - sicurezza Supabase (RLS, service_role, secrets)
+#   - accessibilità WCAG 2.1 AA / EN 301 549 / EAA
+#   - correttezza, coerenza, performance
+#
+# Auth: OAuth token Claude.ai (Pro/Max).
+#   Secret richiesto: CLAUDE_CODE_OAUTH_TOKEN
+#
+# NOTA: ogni run consuma quota dal tuo abbonamento Pro/Max. Se inizia a
+# bruciare troppo, puoi:
+#   - alzare il filtro paths sotto (review solo su file critici)
+#   - abbassare --max-turns
+#   - disabilitare temporaneamente il workflow da GitHub UI
+# =============================================================================
+
+name: Claude Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    # Decommenta per limitare il review ai soli path "critici":
+    # paths:
+    #   - "apps/**"
+    #   - "api/**"
+    #   - "shared/**"
+    #   - "supabase/**"
+    #   - "assets/**"
+    #   - "_layouts/**"
+    #   - "package.json"
+
+# Se arriva un nuovo push sulla stessa PR, cancella il review in corso
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # Skip PR draft e PR aperte da bot (dependabot ecc.)
+    if: |
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read         # solo lettura del codice
+      pull-requests: write   # pubblicare review comment
+      issues: write          # commenti sulla PR (sono "issue comment" lato API)
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # serve la history completa per il diff
+
+      - name: Claude Review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: "--max-turns 20"
+          prompt: |
+            Sei la AI reviewer di **Turni-di-Palco**, app di gestione turni di
+            ATCL-Lazio. Stack: Jekyll + Node/serverless, backend Supabase,
+            deploy su Vercel/Netlify/Render.
+
+            Fai una review del diff di questa PR e pubblica i tuoi findings come
+            commenti inline sulle righe specifiche, quando possibile. Sii
+            diretto, niente fluff, niente complimenti generici. Se la PR è
+            piccola e pulita, una review di 3 righe è perfetta — non inventare
+            problemi.
+
+            Se il diff tocca aree che potrebbero violare regole già definite nel
+            progetto (convenzioni, pattern, schema), consulta `CLAUDE.md` e
+            `AGENTS.md` nella root **solo se necessario** — non a prescindere.
+
+            ## Focus della review (in ordine di priorità)
+
+            **1. Sicurezza (priorità massima)**
+            - `SUPABASE_SERVICE_ROLE_KEY` non deve MAI finire lato client.
+            - Row Level Security: tabelle nuove/modificate devono avere policy
+              RLS coerenti. Segnala query o endpoint che bypassano RLS senza
+              giustificazione.
+            - Nessun secret hard-coded (chiavi, token, URL privati, JWT).
+            - Validazione input lato server, mai fidarsi del client.
+            - SQL injection, XSS, CSRF, open redirect dove applicabile.
+
+            **2. Accessibilità — WCAG 2.1 AA / EN 301 549 / EAA**
+            L'app deve rispettare l'European Accessibility Act. Verifica:
+            - Markup semantico (`<header>`, `<nav>`, `<main>`, `<button>` vs
+              `<div>`); ogni `<input>` con `<label>` o `aria-label`; ogni
+              `<img>` con `alt` (vuoto se decorativa).
+            - Operabilità da tastiera, focus visibile, ordine di tab logico.
+            - Contrasto colore: 4.5:1 testo normale, 3:1 testo grande e UI.
+            - `aria-*` corretti, niente `aria-hidden` su elementi focusable.
+            - Errori di form annunciati ad assistive technology.
+            - Nessuna informazione veicolata SOLO dal colore.
+            - Heading order coerente.
+
+            **3. Correttezza e logic bugs**
+            - Edge case, off-by-one, gestione errori, race condition.
+            - Query Supabase: filtri, paginazione, gestione null,
+              `.maybeSingle()` vs `.single()`, error handling.
+
+            **4. Coerenza e manutenibilità**
+            - Rispetta pattern e convenzioni esistenti, eslint, prettier.
+            - Codice duplicato, funzioni troppo lunghe, naming ambiguo.
+            - Query N+1, payload eccessivi, re-render inutili.
+
+            ## Formato output
+
+            Concludi con un summary comment così:
+
+            **🔴 Bloccante** (da fixare prima del merge) — elenco puntato.
+            **🟡 Da valutare** (suggerimenti utili, non bloccanti).
+            **🟢 Ok** (cose fatte bene, max 2-3 punti).
+
+            Se non c'è niente di bloccante, dillo apertamente e chiudi corto.
+
+            Rispondi in **italiano**.
