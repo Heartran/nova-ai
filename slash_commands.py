@@ -1,15 +1,15 @@
 """
-slash_commands.py — Discord slash commands per gestire la memoria di Nova.
+slash_commands.py — Discord slash commands to manage Nova's memory.
 
-Comandi (tutti scoped al server corrente, o al DM dell'utente in privato):
-- /ricorda nota:                 quick note in conversations.md (admin-only nei server)
-- /memoria lista                 lista i .md presenti nello scope (chiunque)
-- /memoria mostra file:          mostra il contenuto di un .md (chiunque, ephemeral)
-- /memoria aggiungi file: contenuto:   appende contenuto a un .md (admin)
-- /dimentica indice:             rimuove l'n-esima nota da conversations.md (admin)
+Commands (all scoped to the current server, or to the user's DM in private):
+- /ricorda nota:                 quick note in conversations.md (admin-only in servers)
+- /memoria lista                 list the .md files in the scope (anyone)
+- /memoria mostra file:          show the contents of a .md (anyone, ephemeral)
+- /memoria aggiungi file: contenuto:   append content to a .md (admin)
+- /dimentica indice:             remove the n-th note from conversations.md (admin)
 
-Permessi: nei server i comandi di scrittura richiedono `manage_guild`. In DM
-i comandi sono sempre disponibili (utente parla con la sua memoria personale).
+Permissions: in servers the write commands require `manage_guild`. In DMs
+commands are always available (the user talks to their own private memory).
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from nova_read import load_read_blacklist, save_read_blacklist
 
 logger = logging.getLogger(__name__)
 
-# Limite Discord per il content di un'interazione
+# Discord limit for an interaction's content
 DISCORD_MSG_LIMIT = 1900
 
 
@@ -48,7 +48,7 @@ def _scope_for_interaction(
 
 
 def _safe_md_target(scope_dir: Path, filename: str) -> Path | None:
-    """Valida il filename e restituisce il path solo se rimane dentro scope_dir."""
+    """Validate the filename and return the path only if it stays within scope_dir."""
     if not filename or not filename.endswith(".md"):
         return None
     if "/" in filename or "\\" in filename or ".." in filename:
@@ -67,7 +67,7 @@ def register_slash_commands(
     scope_dir_for: Callable[[Path, str, int | str], Path],
     ensure_skeleton: Callable[[Path, str], None],
 ) -> None:
-    """Registra tutti gli slash command sul tree fornito."""
+    """Register all slash commands on the provided tree."""
 
     # /ricorda nota:
     @tree.command(name="ricorda", description="Salva una nota nella memoria di questo server/DM")
@@ -252,7 +252,7 @@ def register_slash_commands(
             return
 
         lines = text.splitlines(keepends=True)
-        # Trovo le righe-nota: iniziano con "- **["
+        # Find the note lines: they start with "- **["
         note_indices = [i for i, line in enumerate(lines) if line.lstrip().startswith("- **[")]
         if indice < 1 or indice > len(note_indices):
             await interaction.response.send_message(

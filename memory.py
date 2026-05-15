@@ -1,61 +1,61 @@
 """
-memory.py — Lettura/scrittura della memoria di Nova.
+memory.py — Read/write Nova's memory.
 
-Layout (sotto NOVA_MEMORY_DIR):
-  _shared/*.md                       <- letta SEMPRE (lore FNAC, regole globali)
+Layout (under NOVA_MEMORY_DIR):
+  _shared/*.md                       <- ALWAYS read (global lore, rules)
   server/<guild_id>/{lore,characters,conversations,INDEX}.md
   dm/<user_id>/{conversations,INDEX}.md
   whatsapp/<jid>/{conversations,INDEX}.md
 
-Tre fonti combinate ad ogni messaggio:
-  1) _shared/: memoria globale (lore, membri, regole comportamentali). Read + write.
-     Letta a OGNI risposta, indipendentemente dallo scope (Discord/DM/WhatsApp).
-  2) memoria di scope (per server, DM o WhatsApp): note specifiche della chat. Read + write.
-  3) USER_MEMORY_DIR: auto-memory utente di Claude (.md). Read-only.
+Three sources combined on every message:
+  1) _shared/: global memory (lore, members, behavioral rules). Read + write.
+     Read on EVERY reply, regardless of scope (Discord/DM/WhatsApp).
+  2) scope memory (server, DM or WhatsApp): chat-specific notes. Read + write.
+  3) USER_MEMORY_DIR: Claude's user auto-memory (.md). Read-only.
 
-I file vengono letti ad ogni richiesta (no cache) cosi' Nova vede sempre
-l'ultima versione. Se la memoria un giorno diventasse enorme, qui si mette
-una cache TTL.
+Files are read on every request (no cache) so Nova always sees the latest
+version. If memory grows huge one day, a TTL cache could go here.
 """
 
 from __future__ import annotations
 
 import logging
+import shutil
 from datetime import datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Hard limit per evitare di saturare il context se la memoria cresce a dismisura.
-# 80 KB per sezione e' gia' un quintale di testo.
+# Hard limit to avoid saturating the context if memory grows unbounded.
+# 80 KB per section is already a ton of text.
 MAX_SECTION_BYTES = 80_000
 
-# Nome della cartella condivisa sotto NOVA_MEMORY_DIR.
+# Name of the shared folder under NOVA_MEMORY_DIR.
 SHARED_DIRNAME = "_shared"
 
 
 def _read_md_files(directory: Path, label: str) -> str:
     """
-    Legge tutti i .md della cartella (non ricorsivo) e li concatena con header.
+    Read all .md files in the folder (non-recursive) and concatenate with header.
 
     Args:
-        directory: Path della cartella.
-        label: etichetta usata nei log.
+        directory: folder Path.
+        label: label used in logs.
 
     Returns:
-        stringa concatenata, o "" se la cartella non esiste o e' vuota.
+        concatenated string, or "" if the folder is missing or empty.
     """
     if not directory.exists():
-        logger.warning("[%s] cartella non trovata: %s", label, directory)
+        logger.warning("[%s] folder not found: %s", label, directory)
         return ""
     if not directory.is_dir():
-        logger.warning("[%s] non e' una cartella: %s", label, directory)
+        logger.warning("[%s] not a folder: %s", label, directory)
         return ""
 
     chunks: list[str] = []
     total = 0
 
-    # Ordine alfabetico stabile, INDEX/MEMORY in cima se ci sono.
+    # Stable alphabetical order, INDEX/MEMORY on top if present.
     files = sorted(
         directory.glob("*.md"),
         key=lambda p: (
@@ -68,7 +68,7 @@ def _read_md_files(directory: Path, label: str) -> str:
         try:
             text = path.read_text(encoding="utf-8")
         except OSError as e:
-            logger.error("[%s] errore lettura %s: %s", label, path.name, e)
+            logger.error("[%s] read error %s: %s", label, path.name, e)
             continue
 
         header = f"### File: {path.name}\n"
@@ -76,60 +76,60 @@ def _read_md_files(directory: Path, label: str) -> str:
 
         if total + len(chunk.encode("utf-8")) > MAX_SECTION_BYTES:
             logger.warning(
-                "[%s] hard limit raggiunto a %s, file successivi ignorati",
+                "[%s] hard limit reached at %s, remaining files ignored",
                 label,
                 path.name,
             )
-            chunks.append(f"### (altri file presenti, troncati per limite di {MAX_SECTION_BYTES} byte)")
+            chunks.append(f"### (more files present, truncated due to {MAX_SECTION_BYTES} byte limit)")
             break
 
         chunks.append(chunk)
         total += len(chunk.encode("utf-8"))
 
     if not chunks:
-        logger.info("[%s] nessun .md trovato in %s", label, directory)
+        logger.info("[%s] no .md found in %s", label, directory)
         return ""
 
-    logger.info("[%s] letti %d file da %s (%d byte)", label, len(chunks), directory, total)
+    logger.info("[%s] read %d files from %s (%d bytes)", label, len(chunks), directory, total)
     return "\n".join(chunks)
 
 
 def scope_dir_for(base: Path, scope_type: str, scope_id: int | str) -> Path:
     """
-    Ritorna la cartella memoria per uno scope (server, DM o whatsapp).
+    Return the memory folder for a scope (server, DM or whatsapp).
 
     Args:
         base: NOVA_MEMORY_DIR
-        scope_type: "server", "dm" o "whatsapp"
+        scope_type: "server", "dm" or "whatsapp"
         scope_id: guild_id (server), user_id (dm), chat JID (whatsapp)
     """
     if scope_type not in ("server", "dm", "whatsapp"):
-        raise ValueError(f"scope_type deve essere 'server', 'dm' o 'whatsapp', non {scope_type!r}")
+        raise ValueError(f"scope_type must be 'server', 'dm' or 'whatsapp', not {scope_type!r}")
     return base / scope_type / str(scope_id)
 
 
 def shared_dir(base: Path) -> Path:
-    """Ritorna la cartella della memoria condivisa (NOVA_MEMORY_DIR/_shared)."""
+    """Return the shared memory folder (NOVA_MEMORY_DIR/_shared)."""
     return base / SHARED_DIRNAME
 
 
 def load_scope_memory(scope_dir: Path) -> str:
-    """Memoria di uno scope (server, DM o WhatsApp): note specifiche della chat."""
+    """Memory for a scope (server, DM or WhatsApp): chat-specific notes."""
     label = "/".join(scope_dir.parts[-2:]) if len(scope_dir.parts) >= 2 else scope_dir.name
     return _read_md_files(scope_dir, f"SCOPE {label}")
 
 
 def load_shared_memory(base: Path) -> str:
     """
-    Memoria condivisa: tutti i .md sotto NOVA_MEMORY_DIR/_shared/.
-    Letta a OGNI risposta, indipendentemente dallo scope.
-    Qui vive il lore del progetto, i membri ricorrenti, le regole globali.
+    Shared memory: all .md files under NOVA_MEMORY_DIR/_shared/.
+    Read on EVERY reply, regardless of scope.
+    Project lore, recurring members and global rules live here.
     """
     return _read_md_files(shared_dir(base), "SHARED")
 
 
 def load_user_memory(user_memory_dir: Path) -> str:
-    """Auto-memory di Claude su Fede (chi e', preferenze, contesto)."""
+    """Claude's auto-memory about the user (identity, preferences, context)."""
     return _read_md_files(user_memory_dir, "USER")
 
 
@@ -182,10 +182,41 @@ _SHARED_TEMPLATES = {
 }
 
 
+def bootstrap_memory_dir(base: Path, template_dir: Path) -> bool:
+    """
+    Bootstrap the memory folder from a committed template on first run.
+
+    If `base` already exists, do nothing and return False. Otherwise, copy the
+    entire `template_dir` tree to `base` so the user starts with a working
+    skeleton (shared INDEX, group placeholder, empty scope folders).
+
+    Args:
+        base: target NOVA_MEMORY_DIR.
+        template_dir: source template (e.g. <repo>/memory.example).
+
+    Returns:
+        True if the bootstrap copy happened, False otherwise.
+    """
+    if base.exists():
+        return False
+    if not template_dir.exists() or not template_dir.is_dir():
+        logger.warning("Memory template not found at %s, skipping bootstrap", template_dir)
+        return False
+
+    try:
+        shutil.copytree(template_dir, base)
+    except OSError as e:
+        logger.error("Failed to bootstrap memory dir %s from %s: %s", base, template_dir, e)
+        return False
+
+    logger.info("Memory initialized from template %s -> %s", template_dir, base)
+    return True
+
+
 def ensure_scope_skeleton(scope_dir: Path, scope_type: str = "server") -> None:
     """
-    Crea la cartella di scope con i file template se non esiste.
-    scope_type: "server", "dm" o "whatsapp" (template diversi).
+    Create the scope folder with template files if missing.
+    scope_type: "server", "dm" or "whatsapp" (different templates).
     """
     if scope_dir.exists():
         return
@@ -193,7 +224,7 @@ def ensure_scope_skeleton(scope_dir: Path, scope_type: str = "server") -> None:
     try:
         scope_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:
-        logger.error("Impossibile creare %s: %s", scope_dir, e)
+        logger.error("Could not create %s: %s", scope_dir, e)
         return
 
     if scope_type == "server":
@@ -206,15 +237,15 @@ def ensure_scope_skeleton(scope_dir: Path, scope_type: str = "server") -> None:
         path = scope_dir / name
         try:
             path.write_text(content, encoding="utf-8")
-            logger.info("Creato template %s", path)
+            logger.info("Created template %s", path)
         except OSError as e:
-            logger.error("Errore scrittura %s: %s", path, e)
+            logger.error("Write error %s: %s", path, e)
 
 
 def ensure_shared_skeleton(base: Path) -> None:
     """
-    Crea NOVA_MEMORY_DIR/_shared/ con i file template se non esiste.
-    Idempotente: se la cartella c'e' gia', non tocca niente.
+    Create NOVA_MEMORY_DIR/_shared/ with template files if missing.
+    Idempotent: if the folder is already there, nothing happens.
     """
     sd = shared_dir(base)
     if sd.exists():
@@ -223,45 +254,45 @@ def ensure_shared_skeleton(base: Path) -> None:
     try:
         sd.mkdir(parents=True, exist_ok=True)
     except OSError as e:
-        logger.error("Impossibile creare %s: %s", sd, e)
+        logger.error("Could not create %s: %s", sd, e)
         return
 
     for name, content in _SHARED_TEMPLATES.items():
         path = sd / name
         try:
             path.write_text(content, encoding="utf-8")
-            logger.info("Creato template shared %s", path)
+            logger.info("Created shared template %s", path)
         except OSError as e:
-            logger.error("Errore scrittura %s: %s", path, e)
+            logger.error("Write error %s: %s", path, e)
 
 
 def append_conversation_note(nova_memory_dir: Path, note: str, author: str = "system") -> bool:
     """
-    Aggiunge una nota a conversations.md. Usata solo quando Fede lo chiede
-    esplicitamente al bot ("ricordati che...", "salva nota...", ecc.).
+    Append a note to conversations.md. Used only when the user explicitly asks
+    the bot ("remember that...", "save note...", etc.).
 
     Args:
-        nova_memory_dir: cartella della memoria FNAC.
-        note: testo della nota.
-        author: chi l'ha richiesta (display name Discord).
+        nova_memory_dir: memory folder.
+        note: note text.
+        author: who requested it (Discord display name).
 
     Returns:
-        True se ha scritto, False altrimenti.
+        True if written, False otherwise.
     """
     target = nova_memory_dir / "conversations.md"
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
     entry = f"\n- **[{timestamp}]** ({author}) {note.strip()}\n"
 
     try:
-        # Crea il file se manca
+        # Create the file if missing
         if not target.exists():
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text("# Note dalle conversazioni\n", encoding="utf-8")
 
         with target.open("a", encoding="utf-8") as f:
             f.write(entry)
-        logger.info("Nota aggiunta a %s", target)
+        logger.info("Note appended to %s", target)
         return True
     except OSError as e:
-        logger.error("Errore append in %s: %s", target, e)
+        logger.error("Append error in %s: %s", target, e)
         return False

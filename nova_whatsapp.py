@@ -1,18 +1,18 @@
 """
-nova_whatsapp.py — Polling loop per ascoltare chat WhatsApp specifiche.
+nova_whatsapp.py — Polling loop that listens to specific WhatsApp chats.
 
-Ogni WHATSAPP_POLL_INTERVAL secondi interroga il DB SQLite del bridge Go
-(whatsapp-bridge/store/messages.db) cercando nuovi messaggi nelle chat configurate.
-Per ogni batch di nuovi messaggi Nova chiama Claude e invia la risposta tramite
-l'API HTTP del bridge (POST http://localhost:8080/api/send).
+Every WHATSAPP_POLL_INTERVAL seconds it queries the Go bridge's SQLite DB
+(whatsapp-bridge/store/messages.db) looking for new messages in the configured
+chats. For each batch of new messages Nova calls Claude and sends the reply
+via the bridge's HTTP API (POST http://localhost:8080/api/send).
 
-Configurazione .env necessaria:
-  WHATSAPP_WATCHED_JIDS    — JID delle chat da monitorare, separati da virgola
-                             Es. 393XXXXXXXX@s.whatsapp.net,XXXXX@g.us
-  WHATSAPP_BRIDGE_DB       — path assoluto al messages.db del bridge Go
-  WHATSAPP_API_URL         — base URL API bridge (default: http://localhost:8080/api)
-  WHATSAPP_POLL_INTERVAL   — secondi tra un poll e l'altro (default: 5)
-  WHATSAPP_HISTORY_LIMIT   — messaggi di contesto storico da includere (default: 20)
+Required .env configuration:
+  WHATSAPP_WATCHED_JIDS    — JIDs of chats to watch, comma-separated
+                             e.g. <number>@s.whatsapp.net,<id>@g.us
+  WHATSAPP_BRIDGE_DB       — absolute path to the Go bridge's messages.db
+  WHATSAPP_API_URL         — bridge API base URL (default: http://localhost:8080/api)
+  WHATSAPP_POLL_INTERVAL   — seconds between polls (default: 5)
+  WHATSAPP_HISTORY_LIMIT   — historical context messages to include (default: 20)
 """
 
 from __future__ import annotations
@@ -54,11 +54,11 @@ _WA_ALLOWED_TOOLS = [
 
 
 # ---------------------------------------------------------------------------
-# Checkpoints per chat WhatsApp (chiavi stringa = JID)
+# Checkpoints for WhatsApp chats (string keys = JID)
 # ---------------------------------------------------------------------------
 
 class WhatsappCheckpoints:
-    """Salva l'ultimo timestamp visto per ogni chat JID monitorata."""
+    """Stores the last seen timestamp for each watched chat JID."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -71,9 +71,9 @@ class WhatsappCheckpoints:
             return
         try:
             self._data = json.loads(self.path.read_text(encoding="utf-8"))
-            logger.info("WA checkpoints caricati: %d chat", len(self._data))
+            logger.info("WA checkpoints loaded: %d chats", len(self._data))
         except (OSError, json.JSONDecodeError) as e:
-            logger.error("Errore caricamento WA checkpoints: %s", e)
+            logger.error("Error loading WA checkpoints: %s", e)
 
     def _save(self) -> None:
         try:
@@ -82,7 +82,7 @@ class WhatsappCheckpoints:
             tmp.write_text(json.dumps(self._data, indent=2, ensure_ascii=False), encoding="utf-8")
             tmp.replace(self.path)
         except OSError as e:
-            logger.error("Errore salvataggio WA checkpoints: %s", e)
+            logger.error("Error saving WA checkpoints: %s", e)
 
     def get(self, jid: str) -> datetime | None:
         ts = self._data.get(jid)
@@ -100,11 +100,11 @@ class WhatsappCheckpoints:
 
 
 # ---------------------------------------------------------------------------
-# Accesso SQLite (eseguito in thread per non bloccare l'event loop)
+# SQLite access (run in a thread to avoid blocking the event loop)
 # ---------------------------------------------------------------------------
 
 def _fetch_new_messages(db_path: str, chat_jid: str, after: datetime | None, limit: int) -> list[dict]:
-    """Messaggi nuovi in una chat, dal più vecchio al più recente, esclusi quelli inviati da noi."""
+    """New messages in a chat, from oldest to newest, excluding messages we sent."""
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         cursor = conn.cursor()
@@ -139,7 +139,7 @@ def _fetch_new_messages(db_path: str, chat_jid: str, after: datetime | None, lim
             for r in rows
         ]
     except sqlite3.Error as e:
-        logger.error("DB error leggendo nuovi messaggi (%s): %s", chat_jid, e)
+        logger.error("DB error fetching new messages (%s): %s", chat_jid, e)
         return []
     finally:
         if "conn" in locals():
@@ -147,7 +147,7 @@ def _fetch_new_messages(db_path: str, chat_jid: str, after: datetime | None, lim
 
 
 def _fetch_history(db_path: str, chat_jid: str, before_iso: str, limit: int) -> list[dict]:
-    """Messaggi precedenti per costruire il contesto storico (entrambe le direzioni)."""
+    """Earlier messages to build the historical context (both directions)."""
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         cursor = conn.cursor()
@@ -164,7 +164,7 @@ def _fetch_history(db_path: str, chat_jid: str, before_iso: str, limit: int) -> 
             [chat_jid, before_iso, limit],
         )
         rows = cursor.fetchall()
-        rows.reverse()  # riordina cronologicamente
+        rows.reverse()  # reorder chronologically
         return [
             {
                 "id": r[0],
@@ -177,7 +177,7 @@ def _fetch_history(db_path: str, chat_jid: str, before_iso: str, limit: int) -> 
             for r in rows
         ]
     except sqlite3.Error as e:
-        logger.error("DB error leggendo history (%s): %s", chat_jid, e)
+        logger.error("DB error fetching history (%s): %s", chat_jid, e)
         return []
     finally:
         if "conn" in locals():
@@ -185,7 +185,7 @@ def _fetch_history(db_path: str, chat_jid: str, before_iso: str, limit: int) -> 
 
 
 # ---------------------------------------------------------------------------
-# Invio messaggio via bridge Go
+# Send message via Go bridge
 # ---------------------------------------------------------------------------
 
 def _send_via_bridge(api_url: str, recipient_jid: str, text: str) -> bool:
@@ -197,21 +197,21 @@ def _send_via_bridge(api_url: str, recipient_jid: str, text: str) -> bool:
         )
         if resp.status_code == 200:
             return resp.json().get("success", False)
-        logger.error("Bridge HTTP %s per %s: %s", resp.status_code, recipient_jid, resp.text[:200])
+        logger.error("Bridge HTTP %s for %s: %s", resp.status_code, recipient_jid, resp.text[:200])
         return False
     except requests.RequestException as e:
-        logger.error("Errore HTTP invio WA (%s): %s", recipient_jid, e)
+        logger.error("HTTP error sending WA (%s): %s", recipient_jid, e)
         return False
 
 
 # ---------------------------------------------------------------------------
-# Costruzione messaggi per Claude
+# Build messages for Claude
 # ---------------------------------------------------------------------------
 
 def _build_messages_for_claude(history: list[dict], new_msgs: list[dict]) -> list[dict]:
     """
-    Converte i messaggi DB nel formato user/assistant della Messages API.
-    is_from_me=True -> assistant, altrimenti -> user con prefisso mittente.
+    Convert DB rows to the user/assistant format of the Messages API.
+    is_from_me=True -> assistant, otherwise -> user with a sender prefix.
     """
     msgs: list[dict] = []
 
@@ -237,7 +237,7 @@ def _build_messages_for_claude(history: list[dict], new_msgs: list[dict]) -> lis
 
 
 def _serialize_history_wa(messages: list[dict]) -> str:
-    """Stesso pattern di nova_bot._serialize_history ma per il contesto WA."""
+    """Same pattern as nova_bot._serialize_history but for the WA context."""
     if not messages:
         return ""
     history, last = messages[:-1], messages[-1]["content"]
@@ -255,7 +255,7 @@ def _serialize_history_wa(messages: list[dict]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Chiamata Claude (versione WhatsApp — senza Discord read server)
+# Claude call (WhatsApp version — no Discord read server)
 # ---------------------------------------------------------------------------
 
 async def _call_claude_wa(
@@ -283,7 +283,7 @@ async def _call_claude_wa(
 
 
 # ---------------------------------------------------------------------------
-# Logica di poll per una singola chat
+# Poll logic for a single chat
 # ---------------------------------------------------------------------------
 
 async def _process_chat(
@@ -299,8 +299,8 @@ async def _process_chat(
 ) -> None:
     last_seen = checkpoints.get(jid)
 
-    # Prima volta che vediamo questo JID: segna "adesso" come punto di partenza
-    # e non rispondere ai messaggi già presenti.
+    # First time we see this JID: set "now" as the starting point and do not
+    # reply to messages already in the DB.
     if last_seen is None:
         checkpoints.update(jid, datetime.now(timezone.utc))
         return
@@ -312,7 +312,7 @@ async def _process_chat(
     if not new_msgs:
         return
 
-    # Aggiorna checkpoint immediatamente (anche se la chiamata Claude fallisce)
+    # Advance the checkpoint immediately (even if the Claude call fails)
     latest_ts_str = new_msgs[-1]["timestamp"]
     try:
         latest_ts = datetime.fromisoformat(latest_ts_str)
@@ -322,7 +322,7 @@ async def _process_chat(
         latest_ts = datetime.now(timezone.utc)
     checkpoints.update(jid, latest_ts)
 
-    # Scope memoria: whatsapp/<jid>/
+    # Memory scope: whatsapp/<jid>/
     scope_dir = scope_dir_for(nova_memory_dir, "whatsapp", jid)
     ensure_scope_skeleton(scope_dir, "whatsapp")
 
@@ -330,7 +330,7 @@ async def _process_chat(
     shared_mem = load_shared_memory(nova_memory_dir)
     user_mem = load_user_memory(user_memory_dir) if user_memory_dir.exists() else ""
 
-    # Recupera contesto storico precedente
+    # Fetch earlier history for context
     history: list[dict] = await asyncio.to_thread(
         _fetch_history, db_path, jid, new_msgs[0]["timestamp"], history_limit
     )
@@ -351,7 +351,7 @@ async def _process_chat(
     memory_server = build_memory_server(scope_dir)
 
     logger.info(
-        "WA poll: %d nuovi messaggi in '%s', genero risposta...",
+        "WA poll: %d new messages in '%s', generating reply...",
         len(new_msgs),
         chat_name,
     )
@@ -359,22 +359,22 @@ async def _process_chat(
     try:
         reply = await _call_claude_wa(system_prompt, messages, memory_server, model)
     except Exception:
-        logger.exception("Errore chiamata Claude per chat WA %s", jid)
+        logger.exception("Error calling Claude for WA chat %s", jid)
         return
 
     if not reply:
-        logger.warning("Claude ha restituito risposta vuota per %s", jid)
+        logger.warning("Claude returned an empty response for %s", jid)
         return
 
     ok = await asyncio.to_thread(_send_via_bridge, api_url, jid, reply)
     if ok:
-        logger.info("Risposta WA inviata a %s (%d caratteri)", chat_name, len(reply))
+        logger.info("WA reply sent to %s (%d characters)", chat_name, len(reply))
     else:
-        logger.error("Invio WA fallito per %s", jid)
+        logger.error("WA send failed for %s", jid)
 
 
 # ---------------------------------------------------------------------------
-# Entry point: task da avviare con asyncio.create_task()
+# Entry point: task to start with asyncio.create_task()
 # ---------------------------------------------------------------------------
 
 async def start_whatsapp_poller(
@@ -389,31 +389,31 @@ async def start_whatsapp_poller(
     model: str,
 ) -> None:
     """
-    Loop di polling asincrono. Chiama con asyncio.create_task() dentro on_ready.
+    Async polling loop. Call with asyncio.create_task() inside on_ready.
 
-    Non ritorna mai (gira fino a cancellazione del task).
+    Never returns (runs until the task is cancelled).
     """
     if not watched_jids:
-        logger.warning("Nessun JID WhatsApp configurato, poller disabilitato")
+        logger.warning("No WhatsApp JIDs configured, poller disabled")
         return
 
-    # Verifica che il DB esista già (il bridge potrebbe non essere avviato)
+    # Verify the DB already exists (the bridge may not be running yet)
     if not Path(db_path).exists():
         logger.warning(
-            "WHATSAPP_BRIDGE_DB non trovato: %s — il poller aspetterà che appaia",
+            "WHATSAPP_BRIDGE_DB not found: %s — the poller will wait for it",
             db_path,
         )
 
     checkpoints = WhatsappCheckpoints(nova_memory_dir / "whatsapp_checkpoints.json")
     logger.info(
-        "WhatsApp poller avviato | chat: %s | intervallo: %ss",
+        "WhatsApp poller started | chats: %s | interval: %ss",
         ", ".join(watched_jids),
         poll_interval,
     )
 
     while True:
         if not Path(db_path).exists():
-            logger.debug("DB bridge non ancora disponibile, attendo...")
+            logger.debug("Bridge DB not available yet, waiting...")
             await asyncio.sleep(poll_interval)
             continue
 
@@ -430,6 +430,6 @@ async def start_whatsapp_poller(
                     model=model,
                 )
             except Exception:
-                logger.exception("Errore nel poll di %s", jid)
+                logger.exception("Error polling %s", jid)
 
         await asyncio.sleep(poll_interval)

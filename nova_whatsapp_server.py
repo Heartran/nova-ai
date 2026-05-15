@@ -1,21 +1,21 @@
 """
-nova_whatsapp_server.py — Server WhatsApp interattivo per Nova.
+nova_whatsapp_server.py — Interactive WhatsApp server for Nova.
 
-Avvio:  python nova_whatsapp_server.py
+Start:  python nova_whatsapp_server.py
         python nova_whatsapp_server.py --db <path_messages.db>  (override config)
 
-Il server carica la configurazione da .env e da whatsapp_config.json nella
-NOVA_MEMORY_DIR. I JID monitorati si gestiscono live dalla CLI senza riavvio.
+The server loads config from .env and from whatsapp_config.json under
+NOVA_MEMORY_DIR. Watched JIDs are managed live from the CLI with no restart.
 
-Comandi CLI:
-  chats [query]      Lista le chat nel DB (con numero per riferimento rapido)
-  watch <jid|n>      Aggiungi una chat al monitoring (JID o numero da 'chats')
-  unwatch <jid|n>    Rimuovi una chat dal monitoring
-  list               Lista le chat monitorate
-  status             Stato del server e del bridge
-  interval <n>       Cambia l'intervallo di poll in secondi
-  help               Mostra questo help
-  quit / exit        Arresta il server
+CLI commands:
+  chats [query]      List chats in the DB (with a number for quick reference)
+  watch <jid|n>      Add a chat to monitoring (JID or number from 'chats')
+  unwatch <jid|n>    Remove a chat from monitoring
+  list               List monitored chats
+  status             Show server and bridge status
+  interval <n>       Change the poll interval in seconds
+  help               Show this help
+  quit / exit        Stop the server
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ import requests
 from dotenv import load_dotenv
 
 # ---------------------------------------------------------------------------
-# Bootstrap: carica .env e aggiungi la cartella nova-ai al path
+# Bootstrap: load .env and add the nova-ai folder to the path
 # ---------------------------------------------------------------------------
 
 _HERE = Path(__file__).parent
@@ -44,6 +44,7 @@ sys.path.insert(0, str(_HERE))
 load_dotenv(_HERE / ".env")
 
 from memory import (
+    bootstrap_memory_dir,
     ensure_scope_skeleton,
     ensure_shared_skeleton,
     load_scope_memory,
@@ -70,12 +71,11 @@ NOVA_MEMORY_DIR = Path(os.getenv("NOVA_MEMORY_DIR", "")).expanduser()
 USER_MEMORY_DIR = Path(os.getenv("USER_MEMORY_DIR", "")).expanduser()
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6").strip()
 
+# Default DB path: read from env, otherwise empty. Set WHATSAPP_BRIDGE_DB in
+# your .env to point at the Go bridge's messages.db, or pass --db on the CLI.
 DEFAULT_BRIDGE_DB = str(
-    Path(os.getenv(
-        "WHATSAPP_BRIDGE_DB",
-        r"C:\Users\Federico\repo\whatsapp-mcp\whatsapp-bridge\store\messages.db",
-    )).expanduser()
-)
+    Path(os.getenv("WHATSAPP_BRIDGE_DB", "")).expanduser()
+) if os.getenv("WHATSAPP_BRIDGE_DB") else ""
 DEFAULT_API_URL = os.getenv("WHATSAPP_API_URL", "http://localhost:8080/api").strip()
 DEFAULT_POLL_INTERVAL = float(os.getenv("WHATSAPP_POLL_INTERVAL", "5"))
 DEFAULT_HISTORY_LIMIT = int(os.getenv("WHATSAPP_HISTORY_LIMIT", "20"))
@@ -83,7 +83,7 @@ DEFAULT_HISTORY_LIMIT = int(os.getenv("WHATSAPP_HISTORY_LIMIT", "20"))
 CONFIG_FILE = NOVA_MEMORY_DIR / "whatsapp_config.json"
 
 # ---------------------------------------------------------------------------
-# Colori ANSI minimali (zero dipendenze extra)
+# Minimal ANSI colors (zero extra dependencies)
 # ---------------------------------------------------------------------------
 
 RESET = "\033[0m"
@@ -101,11 +101,11 @@ def _c(color: str, text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# WatchConfig — config persistente dei JID monitorati
+# WatchConfig — persistent config of watched JIDs
 # ---------------------------------------------------------------------------
 
 class WatchConfig:
-    """Config persistente: JID monitorati + impostazioni del server."""
+    """Persistent config: watched JIDs + server settings."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -124,7 +124,7 @@ class WatchConfig:
             self.poll_interval = float(data.get("poll_interval", DEFAULT_POLL_INTERVAL))
             self.history_limit = int(data.get("history_limit", DEFAULT_HISTORY_LIMIT))
         except (OSError, json.JSONDecodeError, ValueError) as e:
-            print(_c(YELLOW, f"[warn] Errore caricamento config: {e}"))
+            print(_c(YELLOW, f"[warn] Failed to load config: {e}"))
 
     def _save(self) -> None:
         try:
@@ -144,7 +144,7 @@ class WatchConfig:
             )
             tmp.replace(self.path)
         except OSError as e:
-            print(_c(RED, f"[errore] Salvataggio config fallito: {e}"))
+            print(_c(RED, f"[error] Failed to save config: {e}"))
 
     @property
     def watched_jids(self) -> list[str]:
@@ -184,27 +184,27 @@ async def _poll_loop(
     api_url: str,
     stop_event: asyncio.Event,
 ) -> None:
-    """Gira in background finché stop_event non è settato."""
-    logging.getLogger("nova.whatsapp").setLevel(logging.WARNING)  # silenzioso in CLI
+    """Runs in the background until stop_event is set."""
+    logging.getLogger("nova.whatsapp").setLevel(logging.WARNING)  # silent in CLI
 
     poll_count = 0
     while not stop_event.is_set():
         jids = config.watched_jids
-        if jids and Path(db_path).exists():
+        if jids and db_path and Path(db_path).is_file():
             poll_count += 1
             for jid in jids:
                 try:
                     await _poll_one(jid, checkpoints, config, db_path, api_url)
                 except Exception as exc:
-                    _print_log(_c(RED, f"[poll] Errore su {jid}: {exc}"))
+                    _print_log(_c(RED, f"[poll] Error on {jid}: {exc}"))
         elif jids:
-            # DB non ancora disponibile
+            # DB not available yet
             poll_count += 1
 
-        # Tick visivo ogni 12 poll (~60s con intervallo default di 5s)
+        # Visual tick every 12 polls (~60s at the default 5s interval)
         if poll_count % 12 == 0 and jids:
             ts = datetime.now().strftime("%H:%M:%S")
-            _print_log(_c(DIM, f"[{ts}] polling... ({poll_count} cicli, {len(jids)} chat)"))
+            _print_log(_c(DIM, f"[{ts}] polling... ({poll_count} cycles, {len(jids)} chats)"))
 
         interval = config.poll_interval
         try:
@@ -222,8 +222,8 @@ async def _poll_one(
 ) -> None:
     last_seen = checkpoints.get(jid)
 
-    # Prima volta che vediamo questo JID: segna "adesso" come punto di partenza
-    # e non rispondere ai messaggi già presenti.
+    # First time we see this JID: set "now" as the starting point and do not
+    # reply to messages already in the DB.
     if last_seen is None:
         checkpoints.update(jid, datetime.now(timezone.utc))
         return
@@ -232,7 +232,7 @@ async def _poll_one(
     if not new_msgs:
         return
 
-    # Aggiorna checkpoint subito
+    # Advance the checkpoint immediately
     try:
         latest_ts = datetime.fromisoformat(new_msgs[-1]["timestamp"])
         if latest_ts.tzinfo is None:
@@ -266,35 +266,35 @@ async def _poll_one(
 
     _print_log(
         _c(CYAN, f"[{chat_name}]")
-        + f" {len(new_msgs)} nuovi messaggi, rispondo..."
+        + f" {len(new_msgs)} new messages, replying..."
     )
 
     reply = await _call_claude_wa(system_prompt, messages, memory_server, CLAUDE_MODEL)
 
     if not reply:
-        _print_log(_c(YELLOW, f"[{chat_name}] Risposta vuota da Claude"))
+        _print_log(_c(YELLOW, f"[{chat_name}] Empty response from Claude"))
         return
 
     ok = await asyncio.to_thread(_send_via_bridge, api_url, jid, reply)
-    status = _c(GREEN, "✓") if ok else _c(RED, "✗")
-    _print_log(f"{status} [{chat_name}] Risposta inviata ({len(reply)} car.)")
+    status = _c(GREEN, "OK") if ok else _c(RED, "FAIL")
+    _print_log(f"{status} [{chat_name}] Reply sent ({len(reply)} chars)")
 
 
 # ---------------------------------------------------------------------------
-# CLI interattiva
+# Interactive CLI
 # ---------------------------------------------------------------------------
 
-_last_chats: list[dict] = []  # risultato dell'ultimo 'chats' per riferimento numerico
+_last_chats: list[dict] = []  # result of the last 'chats' for numeric reference
 
 
 def _print_log(msg: str) -> None:
-    """Stampa un log senza sporcare il prompt (sovrascrive la riga prompt)."""
+    """Print a log without messing up the prompt (overwrites the prompt line)."""
     print(f"\r{msg}")
     print(_c(DIM, "wa> "), end="", flush=True)
 
 
 def _list_chats_from_db(db_path: str, query_str: str = "", limit: int = 30) -> list[dict]:
-    """Legge le chat disponibili dal DB del bridge."""
+    """Read available chats from the bridge DB."""
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
         cursor = conn.cursor()
@@ -323,7 +323,7 @@ def _list_chats_from_db(db_path: str, query_str: str = "", limit: int = 30) -> l
             for r in rows
         ]
     except sqlite3.Error as e:
-        print(_c(RED, f"Errore DB: {e}"))
+        print(_c(RED, f"DB error: {e}"))
         return []
     finally:
         if "conn" in locals():
@@ -332,52 +332,52 @@ def _list_chats_from_db(db_path: str, query_str: str = "", limit: int = 30) -> l
 
 def _resolve_jid(arg: str, config: WatchConfig, db_path: str) -> str | None:
     """
-    Risolve l'argomento del comando watch/unwatch.
-    Può essere un numero (da lista 'chats'), una sottostringa di nome, o un JID completo.
+    Resolve the argument of the watch/unwatch command.
+    Can be a number (from the 'chats' list), a name substring, or a full JID.
     """
-    # Numero dalla lista precedente
+    # Number from the previous list
     if arg.isdigit():
         idx = int(arg) - 1
         if 0 <= idx < len(_last_chats):
             return _last_chats[idx]["jid"]
-        print(_c(RED, f"Numero {arg} non valido. Usa 'chats' per vedere la lista."))
+        print(_c(RED, f"Invalid number {arg}. Run 'chats' to see the list."))
         return None
 
-    # JID diretto (contiene @)
+    # Direct JID (contains @)
     if "@" in arg:
         return arg
 
-    # Sottostringa di nome: cerca nelle ultime chats caricate o nel DB
+    # Name substring: search the last loaded chats or the DB
     candidates = [c for c in _last_chats if arg.lower() in c["name"].lower()]
     if len(candidates) == 1:
         return candidates[0]["jid"]
     if len(candidates) > 1:
-        print(_c(YELLOW, f"Ambiguo — corrisponde a {len(candidates)} chat:"))
+        print(_c(YELLOW, f"Ambiguous — matches {len(candidates)} chats:"))
         for i, c in enumerate(candidates, 1):
-            print(f"  {i}. {_c(BOLD, c['name'])} — {_c(DIM, c['jid'])}")
+            print(f"  {i}. {_c(BOLD, c['name'])} - {_c(DIM, c['jid'])}")
         return None
 
-    # Cerca nel DB
-    if Path(db_path).exists():
+    # Search in the DB
+    if db_path and Path(db_path).is_file():
         results = _list_chats_from_db(db_path, arg, limit=5)
         if len(results) == 1:
             return results[0]["jid"]
         if results:
-            print(_c(YELLOW, f"Nessuna corrispondenza esatta, trovate {len(results)} chat. Usa 'chats {arg}' per vedere."))
-    print(_c(RED, f"'{arg}' non risolto. Usa il JID completo o un numero da 'chats'."))
+            print(_c(YELLOW, f"No exact match, found {len(results)} chats. Run 'chats {arg}' to see."))
+    print(_c(RED, f"'{arg}' could not be resolved. Use the full JID or a number from 'chats'."))
     return None
 
 
 def _cmd_chats(args: list[str], db_path: str) -> None:
     global _last_chats
     if not Path(db_path).exists():
-        print(_c(RED, f"DB non trovato: {db_path}\nAvvia il bridge Go prima."))
+        print(_c(RED, f"DB not found: {db_path}\nStart the Go bridge first."))
         return
     query_str = " ".join(args)
     chats = _list_chats_from_db(db_path, query_str)
     _last_chats = chats
     if not chats:
-        print(_c(YELLOW, "Nessuna chat trovata" + (f" per '{query_str}'" if query_str else "") + "."))
+        print(_c(YELLOW, "No chats found" + (f" for '{query_str}'" if query_str else "") + "."))
         return
     print()
     for i, c in enumerate(chats, 1):
@@ -391,39 +391,39 @@ def _cmd_chats(args: list[str], db_path: str) -> None:
 
 def _cmd_watch(args: list[str], config: WatchConfig, checkpoints: WhatsappCheckpoints, db_path: str) -> None:
     if not args:
-        print(_c(YELLOW, "Uso: watch <jid | numero | nome>"))
+        print(_c(YELLOW, "Usage: watch <jid | number | name>"))
         return
     jid = _resolve_jid(" ".join(args), config, db_path)
     if jid is None:
         return
     name = next((c["name"] for c in _last_chats if c["jid"] == jid), jid)
     already_watched = not config.add(jid)
-    # Resetta sempre il checkpoint a "adesso" — che sia nuova o già presente
+    # Always reset the checkpoint to "now" — whether new or already there
     checkpoints.update(jid, datetime.now(timezone.utc))
     if already_watched:
-        print(_c(GREEN, f"✓ Checkpoint resettato: {_c(BOLD, name)} — ascolto da adesso"))
+        print(_c(GREEN, f"Checkpoint reset: {_c(BOLD, name)} - listening from now"))
     else:
-        print(_c(GREEN, f"✓ Aggiunta: {_c(BOLD, name)} ({jid}) — ascolto da adesso"))
+        print(_c(GREEN, f"Added: {_c(BOLD, name)} ({jid}) - listening from now"))
 
 
 def _cmd_unwatch(args: list[str], config: WatchConfig, db_path: str) -> None:
     if not args:
-        print(_c(YELLOW, "Uso: unwatch <jid | numero | nome>"))
+        print(_c(YELLOW, "Usage: unwatch <jid | number | name>"))
         return
     jid = _resolve_jid(" ".join(args), config, db_path)
     if jid is None:
         return
     name = next((c["name"] for c in _last_chats if c["jid"] == jid), jid)
     if config.remove(jid):
-        print(_c(GREEN, f"✓ Rimossa: {_c(BOLD, name)} ({jid})"))
+        print(_c(GREEN, f"Removed: {_c(BOLD, name)} ({jid})"))
     else:
-        print(_c(YELLOW, f"'{name}' non era monitorata."))
+        print(_c(YELLOW, f"'{name}' was not being monitored."))
 
 
 def _cmd_list(config: WatchConfig) -> None:
     jids = config.watched_jids
     if not jids:
-        print(_c(YELLOW, "Nessuna chat monitorata. Usa 'watch <jid>' per aggiungerne una."))
+        print(_c(YELLOW, "No chats monitored. Use 'watch <jid>' to add one."))
         return
     print()
     for i, jid in enumerate(jids, 1):
@@ -435,8 +435,8 @@ def _cmd_list(config: WatchConfig) -> None:
 
 def _cmd_status(config: WatchConfig, db_path: str, api_url: str) -> None:
     # Bridge DB
-    db_ok = Path(db_path).exists()
-    db_status = _c(GREEN, "✓ trovato") if db_ok else _c(RED, "✗ non trovato")
+    db_ok = bool(db_path) and Path(db_path).is_file()
+    db_status = _c(GREEN, "found") if db_ok else _c(RED, "not found")
 
     # Bridge HTTP
     try:
@@ -444,65 +444,65 @@ def _cmd_status(config: WatchConfig, db_path: str, api_url: str) -> None:
         bridge_ok = resp.status_code == 200
     except requests.RequestException:
         bridge_ok = False
-    bridge_status = _c(GREEN, "✓ risponde") if bridge_ok else _c(YELLOW, "? non raggiungibile")
+    bridge_status = _c(GREEN, "responding") if bridge_ok else _c(YELLOW, "unreachable")
 
     watched = config.watched_jids
     print()
-    print(f"  DB bridge:   {db_status}  ({db_path})")
+    print(f"  Bridge DB:   {db_status}  ({db_path})")
     print(f"  Bridge HTTP: {bridge_status}  ({api_url})")
-    print(f"  Modello:     {_c(BOLD, CLAUDE_MODEL)}")
-    print(f"  Memoria:     {NOVA_MEMORY_DIR}")
-    print(f"  Poll:        ogni {_c(BOLD, str(config.poll_interval))}s")
-    print(f"  Chat:        {_c(BOLD, str(len(watched)))} monitorate")
+    print(f"  Model:       {_c(BOLD, CLAUDE_MODEL)}")
+    print(f"  Memory:      {NOVA_MEMORY_DIR}")
+    print(f"  Poll:        every {_c(BOLD, str(config.poll_interval))}s")
+    print(f"  Chats:       {_c(BOLD, str(len(watched)))} monitored")
     print()
 
 
 def _cmd_interval(args: list[str], config: WatchConfig) -> None:
     if not args or not args[0].replace(".", "", 1).isdigit():
-        print(_c(YELLOW, "Uso: interval <secondi>  (es. interval 10)"))
+        print(_c(YELLOW, "Usage: interval <seconds>  (e.g. interval 10)"))
         return
     val = float(args[0])
     if val < 1:
-        print(_c(RED, "Intervallo minimo: 1 secondo"))
+        print(_c(RED, "Minimum interval: 1 second"))
         return
     config.set_interval(val)
-    print(_c(GREEN, f"✓ Intervallo impostato a {val}s"))
+    print(_c(GREEN, f"Interval set to {val}s"))
 
 
-_DEFAULT_NOTIFY_MSG = "👋 Ciao! Sono Nova, sono in ascolto qui. Scrivimi pure."
+_DEFAULT_NOTIFY_MSG = "Ciao! Sono Nova, sono in ascolto qui. Scrivimi pure."
 
 
 def _cmd_notify(args: list[str], config: WatchConfig, api_url: str) -> None:
-    """Invia un messaggio di avviso a una chat monitorata (o a tutte se senza argomenti)."""
+    """Send a notification message to a watched chat (or to all if no args)."""
     watched = config.watched_jids
     if not watched:
-        print(_c(YELLOW, "Nessuna chat monitorata. Usa 'watch' prima."))
+        print(_c(YELLOW, "No chats monitored. Use 'watch' first."))
         return
 
-    # Argomento opzionale: JID/numero/nome specifico
+    # Optional argument: specific JID/number/name
     if args:
         raw = " ".join(args)
-        # Potrebbe essere un numero indice della lista 'list'
+        # May be an index from the 'list' command
         if raw.isdigit():
             idx = int(raw) - 1
             if 0 <= idx < len(watched):
                 targets = [watched[idx]]
             else:
-                print(_c(RED, f"Numero {raw} non valido (hai {len(watched)} chat monitorate)."))
+                print(_c(RED, f"Invalid number {raw} (you have {len(watched)} monitored chats)."))
                 return
         elif "@" in raw:
             if raw not in watched:
-                print(_c(YELLOW, f"'{raw}' non è nella lista monitorata."))
+                print(_c(YELLOW, f"'{raw}' is not in the watched list."))
                 return
             targets = [raw]
         else:
-            # Substring match sul nome
+            # Substring match on the name
             matches = [
                 j for j in watched
                 if raw.lower() in next((c["name"] for c in _last_chats if c["jid"] == j), j).lower()
             ]
             if not matches:
-                print(_c(RED, f"Nessuna chat monitorata corrisponde a '{raw}'."))
+                print(_c(RED, f"No monitored chat matches '{raw}'."))
                 return
             targets = matches
     else:
@@ -512,26 +512,26 @@ def _cmd_notify(args: list[str], config: WatchConfig, api_url: str) -> None:
         name = next((c["name"] for c in _last_chats if c["jid"] == jid), jid)
         ok = _send_via_bridge(api_url, jid, _DEFAULT_NOTIFY_MSG)
         if ok:
-            print(_c(GREEN, f"✓ Avviso inviato a {_c(BOLD, name)}"))
+            print(_c(GREEN, f"Notification sent to {_c(BOLD, name)}"))
         else:
-            print(_c(RED, f"✗ Invio fallito per {_c(BOLD, name)} ({jid})"))
+            print(_c(RED, f"Send failed for {_c(BOLD, name)} ({jid})"))
 
 
 def _cmd_help() -> None:
     print(f"""
-{_c(BOLD, "Comandi disponibili:")}
+{_c(BOLD, "Available commands:")}
 
-  {_c(CYAN, "chats [query]")}      Lista le chat nel DB del bridge (filtra per nome/JID)
-  {_c(CYAN, "watch <jid|n>")}      Inizia a monitorare una chat (JID, numero da 'chats', o nome)
-  {_c(CYAN, "unwatch <jid|n>")}    Smetti di monitorare una chat
-  {_c(CYAN, "list")}               Mostra le chat attualmente monitorate
-  {_c(CYAN, "status")}             Stato del server, bridge e config
-  {_c(CYAN, "interval <n>")}       Cambia l'intervallo di polling (secondi)
-  {_c(CYAN, "notify [jid|n]")}     Invia avviso "Nova è in ascolto" (tutte le chat o una sola)
-  {_c(CYAN, "help")}               Mostra questo help
-  {_c(CYAN, "quit")} / {_c(CYAN, "exit")}        Arresta il server
+  {_c(CYAN, "chats [query]")}      List chats in the bridge DB (filter by name/JID)
+  {_c(CYAN, "watch <jid|n>")}      Start monitoring a chat (JID, number from 'chats', or name)
+  {_c(CYAN, "unwatch <jid|n>")}    Stop monitoring a chat
+  {_c(CYAN, "list")}               Show currently monitored chats
+  {_c(CYAN, "status")}             Show server, bridge and config status
+  {_c(CYAN, "interval <n>")}       Change the polling interval (seconds)
+  {_c(CYAN, "notify [jid|n]")}     Send a "Nova is listening" notice (all chats or one)
+  {_c(CYAN, "help")}               Show this help
+  {_c(CYAN, "quit")} / {_c(CYAN, "exit")}        Stop the server
 
-{_c(DIM, "Tip: usa i numeri di 'chats' per watch/unwatch senza copiare i JID.")}
+{_c(DIM, "Tip: use the numbers from 'chats' for watch/unwatch without copying JIDs.")}
 """)
 
 
@@ -574,7 +574,7 @@ async def _command_loop(
         elif cmd in ("help", "?", "h"):
             _cmd_help()
         else:
-            print(_c(YELLOW, f"Comando non riconosciuto: '{cmd}'. Scrivi 'help' per la lista."))
+            print(_c(YELLOW, f"Unknown command: '{cmd}'. Type 'help' for the list."))
 
     stop_event.set()
 
@@ -585,21 +585,28 @@ async def _command_loop(
 
 def _banner(db_path: str) -> None:
     print(f"""
-{_c(BOLD + MAGENTA, "╔══════════════════════════════════╗")}
-{_c(BOLD + MAGENTA, "║")}  {_c(BOLD, "Nova WhatsApp Server")}              {_c(BOLD + MAGENTA, "║")}
-{_c(BOLD + MAGENTA, "╚══════════════════════════════════╝")}
+{_c(BOLD + MAGENTA, "+----------------------------------+")}
+{_c(BOLD + MAGENTA, "|")}  {_c(BOLD, "Nova WhatsApp Server")}            {_c(BOLD + MAGENTA, "|")}
+{_c(BOLD + MAGENTA, "+----------------------------------+")}
 
-  DB:      {_c(DIM, db_path)}
-  Memoria: {_c(DIM, str(NOVA_MEMORY_DIR))}
-  Modello: {_c(BOLD, CLAUDE_MODEL)}
+  DB:     {_c(DIM, db_path)}
+  Memory: {_c(DIM, str(NOVA_MEMORY_DIR))}
+  Model:  {_c(BOLD, CLAUDE_MODEL)}
 
-Scrivi {_c(CYAN, "help")} per i comandi, {_c(CYAN, "status")} per lo stato del bridge.
+Type {_c(CYAN, "help")} for commands, {_c(CYAN, "status")} for the bridge status.
 """)
 
 
 async def _main(db_path: str, api_url: str, interval_override: float | None = None) -> None:
     if not NOVA_MEMORY_DIR or str(NOVA_MEMORY_DIR) == ".":
-        sys.exit("Manca NOVA_MEMORY_DIR in .env")
+        sys.exit("Missing NOVA_MEMORY_DIR in .env")
+    if not db_path:
+        sys.exit(
+            "Missing bridge DB path. Set WHATSAPP_BRIDGE_DB in .env or pass --db <path>."
+        )
+    template_dir = Path(__file__).parent / "memory.example"
+    if template_dir.exists():
+        bootstrap_memory_dir(NOVA_MEMORY_DIR, template_dir)
     NOVA_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
     ensure_shared_skeleton(NOVA_MEMORY_DIR)
 
@@ -608,21 +615,21 @@ async def _main(db_path: str, api_url: str, interval_override: float | None = No
         config.set_interval(interval_override)
     checkpoints = WhatsappCheckpoints(NOVA_MEMORY_DIR / "whatsapp_checkpoints.json")
 
-    # Al riavvio, resetta i checkpoint di tutti i JID già configurati a "adesso"
-    # per evitare di processare i messaggi accumulati durante il downtime.
+    # On restart, reset checkpoints of all already-configured JIDs to "now" to
+    # avoid processing messages accumulated during downtime.
     now = datetime.now(timezone.utc)
     for jid in config.watched_jids:
         checkpoints.update(jid, now)
 
     stop_event = asyncio.Event()
 
-    # Gestione Ctrl+C graceful
+    # Graceful Ctrl+C handling
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             loop.add_signal_handler(sig, stop_event.set)
         except NotImplementedError:
-            pass  # Windows non supporta add_signal_handler per tutti i segnali
+            pass  # Windows does not support add_signal_handler for all signals
 
     _banner(db_path)
 
@@ -631,7 +638,7 @@ async def _main(db_path: str, api_url: str, interval_override: float | None = No
         _command_loop(config, checkpoints, stop_event, db_path, api_url),
     )
 
-    print(_c(DIM, "\nServer fermato."))
+    print(_c(DIM, "\nServer stopped."))
 
 
 def main() -> None:
@@ -639,22 +646,22 @@ def main() -> None:
     parser.add_argument(
         "--db",
         default=DEFAULT_BRIDGE_DB,
-        help="Path al messages.db del bridge Go",
+        help="Path to the Go bridge's messages.db",
     )
     parser.add_argument(
         "--api",
         default=DEFAULT_API_URL,
-        help="URL base API bridge (default: http://localhost:8080/api)",
+        help="Bridge API base URL (default: http://localhost:8080/api)",
     )
     parser.add_argument(
         "--interval",
         type=float,
         default=None,
-        help="Override intervallo di poll in secondi",
+        help="Override poll interval in seconds",
     )
     args = parser.parse_args()
 
-    # Sopprime logging di librerie rumorose
+    # Silence noisy library loggers
     logging.basicConfig(level=logging.ERROR)
     logging.getLogger("claude_agent_sdk").setLevel(logging.ERROR)
     logging.getLogger("nova").setLevel(logging.ERROR)
@@ -662,7 +669,7 @@ def main() -> None:
     try:
         asyncio.run(_main(args.db, args.api, args.interval))
     except KeyboardInterrupt:
-        print(_c(DIM, "\nInterrotto."))
+        print(_c(DIM, "\nInterrupted."))
 
 
 if __name__ == "__main__":
