@@ -190,7 +190,7 @@ async def _poll_loop(
     poll_count = 0
     while not stop_event.is_set():
         jids = config.watched_jids
-        if jids and Path(db_path).exists():
+        if jids and db_path and Path(db_path).is_file():
             poll_count += 1
             for jid in jids:
                 try:
@@ -358,7 +358,7 @@ def _resolve_jid(arg: str, config: WatchConfig, db_path: str) -> str | None:
         return None
 
     # Search in the DB
-    if Path(db_path).exists():
+    if db_path and Path(db_path).is_file():
         results = _list_chats_from_db(db_path, arg, limit=5)
         if len(results) == 1:
             return results[0]["jid"]
@@ -435,7 +435,7 @@ def _cmd_list(config: WatchConfig) -> None:
 
 def _cmd_status(config: WatchConfig, db_path: str, api_url: str) -> None:
     # Bridge DB
-    db_ok = Path(db_path).exists()
+    db_ok = bool(db_path) and Path(db_path).is_file()
     db_status = _c(GREEN, "found") if db_ok else _c(RED, "not found")
 
     # Bridge HTTP
@@ -600,6 +600,10 @@ Type {_c(CYAN, "help")} for commands, {_c(CYAN, "status")} for the bridge status
 async def _main(db_path: str, api_url: str, interval_override: float | None = None) -> None:
     if not NOVA_MEMORY_DIR or str(NOVA_MEMORY_DIR) == ".":
         sys.exit("Missing NOVA_MEMORY_DIR in .env")
+    if not db_path:
+        sys.exit(
+            "Missing bridge DB path. Set WHATSAPP_BRIDGE_DB in .env or pass --db <path>."
+        )
     template_dir = Path(__file__).parent / "memory.example"
     if template_dir.exists():
         bootstrap_memory_dir(NOVA_MEMORY_DIR, template_dir)
