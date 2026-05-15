@@ -1,12 +1,12 @@
 """
-checkpoints.py — Storage persistente di "ultimo messaggio visto" per canale.
+checkpoints.py — Persistent storage of "last message seen" per channel.
 
-Serve al catch-up al boot: quando Nova riparte, per ogni canale che ha gia'
-visto, scarica i messaggi successivi al timestamp salvato e (se c'e' un
-messaggio che la chiama) risponde all'ultimo qualificante.
+Used for catch-up at boot: when Nova restarts, for each channel already seen,
+it fetches messages after the stored timestamp and (if there's a message that
+calls her) responds to the last qualifying one.
 
-Storage: un singolo JSON in NOVA_MEMORY_DIR/checkpoints.json. Scrittura
-atomica via tmp + replace, cosi' un crash a meta' non corrompe il file.
+Storage: a single JSON in NOVA_MEMORY_DIR/checkpoints.json. Atomic write via
+tmp + replace, so a crash mid-write doesn't corrupt the file.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 class ChannelCheckpoints:
-    """Mappa channel_id -> {scope, scope_id, last_seen ISO 8601 UTC}."""
+    """Maps channel_id -> {scope, scope_id, last_seen ISO 8601 UTC}."""
 
     def __init__(self, path: Path):
         self.path = path
@@ -34,9 +34,9 @@ class ChannelCheckpoints:
             return
         try:
             self.data = json.loads(self.path.read_text(encoding="utf-8"))
-            logger.info("Caricati %d checkpoint da %s", len(self.data), self.path)
+            logger.info("Loaded %d checkpoints from %s", len(self.data), self.path)
         except (OSError, json.JSONDecodeError) as e:
-            logger.error("Errore caricamento checkpoints %s: %s", self.path, e)
+            logger.error("Error loading checkpoints %s: %s", self.path, e)
             self.data = {}
 
     def _save(self) -> None:
@@ -47,9 +47,9 @@ class ChannelCheckpoints:
                 json.dumps(self.data, indent=2, ensure_ascii=False),
                 encoding="utf-8",
             )
-            tmp.replace(self.path)  # atomico su Windows e POSIX
+            tmp.replace(self.path)  # atomic on Windows and POSIX
         except OSError as e:
-            logger.error("Errore salvataggio checkpoints: %s", e)
+            logger.error("Error saving checkpoints: %s", e)
 
     def is_tracked(self, channel_id: int) -> bool:
         return str(channel_id) in self.data

@@ -4,51 +4,51 @@ Template developed by [Heartran](https://github.com/heartran)
 
 ## Project Structure & Module Organization
 
-- `nova_bot.py`: Entry point principale - inizializza il bot Discord, gestisce i trigger e l'invio dei messaggi.
+- `nova_bot.py`: Main entry point - initializes the Discord bot, handles triggers and message sending.
 
-- `personality.py`: System prompt e personalità di Nova - definisce il carattere, il tono e lo stile di risposta.
+- `personality.py`: System prompt and Nova's personality - defines her character, tone and reply style.
 
-- `memory.py`: Gestione memoria - caricamento file `.md` da `NOVA_MEMORY_DIR` e scrittura su `conversations.md`.
+- `memory.py`: Memory management - loads `.md` files from `NOVA_MEMORY_DIR` and writes to `conversations.md`.
 
-- `nova_mcp.py`: Integration MCP (Model Context Protocol) per estendere le capacità del bot.
+- `nova_mcp.py`: MCP (Model Context Protocol) integration to extend the bot's capabilities.
 
-- `nova_read.py`: Logica di lettura e parsing dei file di memoria e contesto.
+- `nova_read.py`: Read/parse logic for memory and context files.
 
-- `nova_whatsapp.py`: Libreria condivisa per il bridge WhatsApp — accesso SQLite, invio messaggi, chiamata Claude.
+- `nova_whatsapp.py`: Shared library for the WhatsApp bridge — SQLite access, message sending, Claude call.
 
-- `nova_whatsapp_server.py`: Server WhatsApp standalone interattivo. Avvio: `python nova_whatsapp_server.py`. CLI con comandi `chats`, `watch`, `unwatch`, `list`, `status`, `interval`. Config persistente in `NOVA_MEMORY_DIR/whatsapp_config.json`.
+- `nova_whatsapp_server.py`: Standalone interactive WhatsApp server. Start with: `python nova_whatsapp_server.py`. CLI with commands `chats`, `watch`, `unwatch`, `list`, `status`, `interval`. Persistent config in `NOVA_MEMORY_DIR/whatsapp_config.json`.
 
-- `slash_commands.py`: Definizione e gestione dei comandi slash Discord.
+- `slash_commands.py`: Definition and handling of Discord slash commands.
 
-- `checkpoints.py`: Gestione checkpoint per salvataggio e ripristino dello stato.
+- `checkpoints.py`: Checkpoint management for saving and restoring state.
 
-- `.env` / `.env.example`: Configurazione (token Discord, API key Anthropic, path memoria, impostazioni modello).
+- `.env` / `.env.example`: Configuration (Discord token, Anthropic API key, memory path, model settings).
 
-- `.venv/`: Virtual environment Python (non committato).
+- `.venv/`: Python virtual environment (not committed).
 
 ## Build, Test, and Development Commands
 
-- Install deps: `pip install -r requirements.txt` (Python 3.11+; usare `.venv` virtuale).
+- Install deps: `pip install -r requirements.txt` (Python 3.11+; use a `.venv`).
 
-- Avvio bot: `python nova_bot.py`.
+- Start the bot: `python nova_bot.py`.
 
-- Non ci sono test automatizzati ancora; per testare manualmente: avvia il bot e verifica risposta a menzione `@Nova` o DM.
+- No automated tests yet; to test manually: start the bot and verify replies on `@Nova` mention or DM.
 
 ## Coding Style & Naming Conventions
 
-- Python: 4-space indentation (PEP 8), UTF-8, trailing newlines. Use PascalCase per classi, snake_case per funzioni/variabili, UPPER_SNAKE_CASE per costanti.
+- Python: 4-space indentation (PEP 8), UTF-8, trailing newlines. Use PascalCase for classes, snake_case for functions/variables, UPPER_SNAKE_CASE for constants.
 
-- Prefer `pathlib.Path` over string paths. Usare type hints dove possibile.
+- Prefer `pathlib.Path` over string paths. Use type hints where possible.
 
 - Keep design docs concise and date-stamped inside the document.
 
 ## Testing Guidelines
 
-- Place specs in root o cartella `tests/` (es. `test_nova_bot.py`). Mock Discord API e Claude calls per test deterministici.
+- Place specs at the root or in a `tests/` folder (e.g. `test_nova_bot.py`). Mock Discord API and Claude calls for deterministic tests.
 
-- Focus su logiche core: parsing memoria, trigger messaggi, gestione checkpoint.
+- Focus on core logic: memory parsing, message triggers, checkpoint handling.
 
-- Documenta step di verifica manuale per interazioni Discord (es. flow DM vs menzione).
+- Document manual verification steps for Discord interactions (e.g. DM vs mention flows).
 
 ## Commit & Pull Request Guidelines
 
@@ -77,17 +77,17 @@ Template developed by [Heartran](https://github.com/heartran)
 
 - Keep commits small and topical; prefer multiple commits over one large drop when touching orthogonal areas.
 
-## Memoria & Checkpoint
+## Memory & Checkpoints
 
-- I file `.md` in `NOVA_MEMORY_DIR` vengono letti ad ogni messaggio. Mantieni `INDEX.md` aggiornato con nuovi file.
+- The `.md` files in `NOVA_MEMORY_DIR` are read on every message. Keep `INDEX.md` up to date when adding new files.
 
-- `conversations.md` viene scritto automaticamente; non modificarlo manualmente durante l'esecuzione del bot.
+- `conversations.md` is written automatically; do not edit it manually while the bot is running.
 
-- I checkpoint vengono salvati in `.claude/` (non committato).
+- Checkpoints are saved under `.claude/` (not committed).
 
 ## Git Identity
 
-- Every agent should have his own git identity when committing changes in order to have a more clear and readable history
+- Every agent should have its own git identity when committing changes in order to keep history clear and readable.
 
 | Agent | GIT_COMMITTER_NAME / GIT_AUTHOR_NAME | GIT_COMMITTER_EMAIL / GIT_AUTHOR_EMAIL |
 | --- | :---: | --- |

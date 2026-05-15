@@ -1,12 +1,12 @@
 """
-nova_mcp.py — MCP server in-process per la gestione della memoria di Nova.
+nova_mcp.py — In-process MCP server for Nova's memory management.
 
-Tools esposti a Nova:
-- note_remember(note, author): appunta una nota datata in conversations.md
-- memory_append(file, content): appende a un .md della memoria FNAC
+Tools exposed to Nova:
+- note_remember(note, author): append a dated note to conversations.md
+- memory_append(file, content): append to a .md file in the memory dir
 
-Tutte le scritture sono confinate a NOVA_MEMORY_DIR. Validazione del filename
-contro path traversal: deve essere solo basename .md, niente '/', '\\' o '..'.
+All writes are confined to NOVA_MEMORY_DIR. Filename validation against path
+traversal: must be a basename .md only, no '/', '\\' or '..'.
 """
 
 from __future__ import annotations
@@ -23,8 +23,8 @@ logger = logging.getLogger(__name__)
 
 def build_memory_server(nova_memory_dir: Path):
     """
-    Costruisce un MCP server in-process con i tool di gestione memoria.
-    nova_memory_dir e' chiuso nel closure: i tool non possono uscire dalla cartella.
+    Build an in-process MCP server with memory management tools.
+    nova_memory_dir is closed over in the closure: tools cannot escape the dir.
     """
     base = nova_memory_dir.resolve()
 
@@ -69,7 +69,7 @@ def build_memory_server(nova_memory_dir: Path):
     @tool(
         "memory_append",
         (
-            "Appende contenuto a un file .md della memoria FNAC (es. lore.md, characters.md, "
+            "Appende contenuto a un file .md della memoria (es. lore.md, characters.md, "
             "o un nuovo file). Usalo per informazioni piu' strutturate, non per note volanti. "
             "Il filename deve essere solo il nome (es. 'lore.md'), niente percorsi. "
             "Crea il file se non esiste."
@@ -94,9 +94,9 @@ def build_memory_server(nova_memory_dir: Path):
             target.parent.mkdir(parents=True, exist_ok=True)
             with target.open("a", encoding="utf-8") as f:
                 f.write("\n\n" + content + "\n")
-            logger.info("Memoria estesa in %s (+%d byte)", target.name, len(content))
+            logger.info("Memory extended in %s (+%d bytes)", target.name, len(content))
         except OSError as e:
-            logger.error("Errore append in %s: %s", target, e)
+            logger.error("Error appending to %s: %s", target, e)
             return {"content": [{"type": "text", "text": f"Errore scrittura: {e}"}]}
 
         preview = content if len(content) <= 80 else content[:77] + "..."
