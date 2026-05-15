@@ -22,15 +22,11 @@ name: Claude Review
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-    # Decommenta per limitare il review ai soli path "critici":
-    # paths:
-    #   - "apps/**"
-    #   - "api/**"
-    #   - "shared/**"
-    #   - "supabase/**"
-    #   - "assets/**"
-    #   - "_layouts/**"
-    #   - "package.json"
+    paths:
+      - "*.py"
+      - "requirements.txt"
+      - ".github/workflows/*.yml"
+      - "AGENTS.md"
 
 # Se arriva un nuovo push sulla stessa PR, cancella il review in corso
 concurrency:
@@ -62,61 +58,43 @@ jobs:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           claude_args: "--max-turns 20"
           prompt: |
-            Sei la AI reviewer di **Turni-di-Palco**, app di gestione turni di
-            ATCL-Lazio. Stack: Jekyll + Node/serverless, backend Supabase,
-            deploy su Vercel/Netlify/Render.
+            Sei il reviewer di **nova-ai**, bot Discord + WhatsApp scritto in
+            Python che usa claude-agent-sdk, discord.py e un bridge Go per
+            WhatsApp (SQLite polling + HTTP API).
 
             Fai una review del diff di questa PR e pubblica i tuoi findings come
             commenti inline sulle righe specifiche, quando possibile. Sii
-            diretto, niente fluff, niente complimenti generici. Se la PR è
-            piccola e pulita, una review di 3 righe è perfetta — non inventare
-            problemi.
+            diretto, niente fluff. Se la PR è piccola e pulita, tre righe bastano.
 
-            Se il diff tocca aree che potrebbero violare regole già definite nel
-            progetto (convenzioni, pattern, schema), consulta `CLAUDE.md` e
-            `AGENTS.md` nella root **solo se necessario** — non a prescindere.
+            Consulta `AGENTS.md` solo se necessario per capire le convenzioni.
 
-            ## Focus della review (in ordine di priorità)
+            ## Focus (in ordine di priorità)
 
-            **1. Sicurezza (priorità massima)**
-            - `SUPABASE_SERVICE_ROLE_KEY` non deve MAI finire lato client.
-            - Row Level Security: tabelle nuove/modificate devono avere policy
-              RLS coerenti. Segnala query o endpoint che bypassano RLS senza
-              giustificazione.
-            - Nessun secret hard-coded (chiavi, token, URL privati, JWT).
-            - Validazione input lato server, mai fidarsi del client.
-            - SQL injection, XSS, CSRF, open redirect dove applicabile.
+            **1. Sicurezza**
+            - Nessun token/secret hard-coded (Discord token, API key Anthropic).
+            - Accesso SQLite: deve essere read-only (`?mode=ro`), mai write sul DB del bridge.
+            - Input da WhatsApp/Discord mai eseguito come codice.
 
-            **2. Accessibilità — WCAG 2.1 AA / EN 301 549 / EAA**
-            L'app deve rispettare l'European Accessibility Act. Verifica:
-            - Markup semantico (`<header>`, `<nav>`, `<main>`, `<button>` vs
-              `<div>`); ogni `<input>` con `<label>` o `aria-label`; ogni
-              `<img>` con `alt` (vuoto se decorativa).
-            - Operabilità da tastiera, focus visibile, ordine di tab logico.
-            - Contrasto colore: 4.5:1 testo normale, 3:1 testo grande e UI.
-            - `aria-*` corretti, niente `aria-hidden` su elementi focusable.
-            - Errori di form annunciati ad assistive technology.
-            - Nessuna informazione veicolata SOLO dal colore.
-            - Heading order coerente.
+            **2. Correttezza e robustezza**
+            - Gestione errori asyncio: task che crashano silenziosamente.
+            - Checkpoint: aggiornato prima della chiamata Claude (non dopo).
+            - Race condition tra poll loop e command loop su strutture condivise.
+            - Edge case: JID mancante, DB non trovato, bridge HTTP giù.
 
-            **3. Correttezza e logic bugs**
-            - Edge case, off-by-one, gestione errori, race condition.
-            - Query Supabase: filtri, paginazione, gestione null,
-              `.maybeSingle()` vs `.single()`, error handling.
+            **3. Coerenza con il codebase**
+            - Rispetta i pattern di `memory.py` (scope_dir_for, ensure_scope_skeleton).
+            - Funzioni private prefissate con `_`, classi PascalCase, costanti UPPER_SNAKE.
+            - Type hints dove mancano su firme pubbliche.
 
-            **4. Coerenza e manutenibilità**
-            - Rispetta pattern e convenzioni esistenti, eslint, prettier.
-            - Codice duplicato, funzioni troppo lunghe, naming ambiguo.
-            - Query N+1, payload eccessivi, re-render inutili.
+            **4. Manutenibilità**
+            - Duplicazione logica tra nova_whatsapp.py e nova_whatsapp_server.py.
+            - Funzioni troppo lunghe (>50 righe senza buona ragione).
 
             ## Formato output
 
-            Concludi con un summary comment così:
-
             **🔴 Bloccante** (da fixare prima del merge) — elenco puntato.
-            **🟡 Da valutare** (suggerimenti utili, non bloccanti).
-            **🟢 Ok** (cose fatte bene, max 2-3 punti).
+            **🟡 Da valutare** (suggerimenti, non bloccanti).
+            **🟢 Ok** (max 2-3 punti positivi).
 
-            Se non c'è niente di bloccante, dillo apertamente e chiudi corto.
-
+            Se non c'è niente di bloccante, dillo e chiudi corto.
             Rispondi in **italiano**.
