@@ -255,6 +255,53 @@ def _fetch_history(db_path: str, chat_jid: str, before_iso: str, limit: int, con
             conn.close()  # type: ignore[possibly-undefined]
 
 
+def _fetch_tail(db_path: str, chat_jid: str, limit: int = 40, contact_map: dict | None = None) -> list[dict]:
+    """Return the last `limit` messages (all senders) chronologically."""
+    try:
+        jids = _resolve_jid_variants(db_path, chat_jid, contact_map)
+        placeholders = ",".join("?" * len(jids))
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=0&cache=private", uri=True)
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(chats)")
+        has_lid = any(row[1] == "lid" for row in cursor.fetchall())
+        name_expr = (
+            "COALESCE((SELECT name FROM chats WHERE jid = m.chat_jid),"
+            "(SELECT name FROM chats WHERE lid = m.chat_jid), m.chat_jid)"
+            if has_lid else
+            "COALESCE((SELECT name FROM chats WHERE jid = m.chat_jid), m.chat_jid)"
+        )
+        cursor.execute(
+            f"""
+            SELECT m.id, m.timestamp, m.sender, m.content, m.is_from_me, {name_expr} as chat_name
+            FROM messages m
+            WHERE m.chat_jid IN ({placeholders})
+              AND m.content IS NOT NULL AND m.content != ''
+            ORDER BY m.timestamp DESC
+            LIMIT ?
+            """,
+            list(jids) + [limit],
+        )
+        rows = cursor.fetchall()
+        rows.reverse()
+        return [
+            {
+                "id": r[0],
+                "timestamp": r[1],
+                "sender": r[2],
+                "content": r[3],
+                "is_from_me": bool(r[4]),
+                "chat_name": r[5] or chat_jid,
+            }
+            for r in rows
+        ]
+    except sqlite3.Error as e:
+        logger.error("DB error fetching tail (%s): %s", chat_jid, e)
+        return []
+    finally:
+        if "conn" in locals():
+            conn.close()  # type: ignore[possibly-undefined]
+
+
 # ---------------------------------------------------------------------------
 # Send message via Go bridge
 # ---------------------------------------------------------------------------

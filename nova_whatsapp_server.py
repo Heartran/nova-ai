@@ -59,6 +59,7 @@ from nova_whatsapp import (
     _call_claude_wa,
     _fetch_history,
     _fetch_new_messages,
+    _fetch_tail,
     _resolve_jid_variants,
     _send_via_bridge,
 )
@@ -592,7 +593,7 @@ def _cmd_notify(args: list[str], config: WatchConfig, api_url: str) -> None:
 
 
 def _cmd_fetch(args: list[str], config: WatchConfig, checkpoints: WhatsappCheckpoints, db_path: str, api_url: str) -> None:
-    """Force an immediate poll for one or all watched chats."""
+    """Read the current conversation and respond if the last message is unanswered."""
     if args:
         jid = _resolve_jid(" ".join(args), config, db_path)
         if jid is None:
@@ -607,8 +608,61 @@ def _cmd_fetch(args: list[str], config: WatchConfig, checkpoints: WhatsappCheckp
     async def _run() -> None:
         for jid in targets:
             name = next((c["name"] for c in _last_chats if c["jid"] == jid), jid)
-            print(_c(DIM, f"Fetching {name}..."))
-            await _poll_one(jid, checkpoints, config, db_path, api_url, force=True)
+            tail = await asyncio.to_thread(_fetch_tail, db_path, jid, 40, _CONTACT_MAP)
+            if not tail:
+                print(_c(YELLOW, f"[{name}] No messages found."))
+                continue
+
+            # Find the last inbound message and check if Nova already replied after it
+            last_inbound_idx = max(
+                (i for i, m in enumerate(tail) if not m["is_from_me"]), default=None
+            )
+            if last_inbound_idx is None:
+                print(_c(YELLOW, f"[{name}] No inbound messages found."))
+                continue
+
+            already_replied = any(m["is_from_me"] for m in tail[last_inbound_idx + 1:])
+            if already_replied:
+                print(_c(DIM, f"[{name}] Already replied — nothing to do."))
+                continue
+
+            # Build context: history before the last inbound + unanswered messages
+            unanswered = [m for m in tail[last_inbound_idx:] if not m["is_from_me"]]
+            history = tail[:last_inbound_idx]
+            messages = _build_messages_for_claude(history, unanswered)
+
+            jid_variants = await asyncio.to_thread(_resolve_jid_variants, db_path, jid, _CONTACT_MAP)
+            scope_jid = next(
+                (v for v in jid_variants if scope_dir_for(NOVA_MEMORY_DIR, "whatsapp", v).exists()),
+                jid,
+            )
+            scope_dir = scope_dir_for(NOVA_MEMORY_DIR, "whatsapp", scope_jid)
+            ensure_scope_skeleton(scope_dir, "whatsapp")
+            scope_mem = load_scope_memory(scope_dir)
+            shared_mem = load_shared_memory(NOVA_MEMORY_DIR)
+            user_mem = load_user_memory(USER_MEMORY_DIR) if USER_MEMORY_DIR.exists() else ""
+            memory_server = build_memory_server(scope_dir)
+
+            system_prompt = build_system_prompt(shared_mem, scope_mem, user_mem, bot_display_name="Nova")
+
+            _print_log(_c(CYAN, f"[{name}] Fetching — generating reply..."))
+            reply = await _call_claude_wa(system_prompt, messages, memory_server, CLAUDE_MODEL)
+            if not reply:
+                _print_log(_c(YELLOW, f"[{name}] Empty response from Claude."))
+                continue
+
+            ok = await asyncio.to_thread(_send_via_bridge, api_url, jid, reply)
+            status = _c(GREEN, "OK") if ok else _c(RED, "FAIL")
+            _print_log(f"{status} [{name}] Reply sent ({len(reply)} chars)")
+
+            # Advance checkpoint so the poller doesn't re-trigger
+            try:
+                latest_ts = datetime.fromisoformat(unanswered[-1]["timestamp"])
+                if latest_ts.tzinfo is None:
+                    latest_ts = latest_ts.replace(tzinfo=timezone.utc)
+            except ValueError:
+                latest_ts = datetime.now(timezone.utc)
+            checkpoints.update(jid, latest_ts)
 
     asyncio.get_event_loop().create_task(_run())
 
