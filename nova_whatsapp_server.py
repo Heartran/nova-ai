@@ -28,7 +28,7 @@ import os
 import signal
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
 
@@ -277,14 +277,17 @@ async def _poll_one(
     config: WatchConfig,
     db_path: str,
     api_url: str,
+    force: bool = False,
 ) -> None:
     last_seen = checkpoints.get(jid)
 
     # First time we see this JID: set "now" as the starting point and do not
-    # reply to messages already in the DB.
+    # reply to messages already in the DB (unless forced).
     if last_seen is None:
-        checkpoints.update(jid, datetime.now(timezone.utc))
-        return
+        if not force:
+            checkpoints.update(jid, datetime.now(timezone.utc))
+            return
+        last_seen = datetime.now(timezone.utc) - timedelta(hours=24)
 
     new_msgs = await asyncio.to_thread(_fetch_new_messages, db_path, jid, last_seen, 50, _CONTACT_MAP)
     if not new_msgs:
@@ -588,6 +591,28 @@ def _cmd_notify(args: list[str], config: WatchConfig, api_url: str) -> None:
             print(_c(RED, f"Send failed for {_c(BOLD, name)} ({jid})"))
 
 
+def _cmd_fetch(args: list[str], config: WatchConfig, checkpoints: WhatsappCheckpoints, db_path: str, api_url: str) -> None:
+    """Force an immediate poll for one or all watched chats."""
+    if args:
+        jid = _resolve_jid(" ".join(args), config, db_path)
+        if jid is None:
+            return
+        targets = [jid]
+    else:
+        targets = list(config.watched_jids)
+        if not targets:
+            print(_c(YELLOW, "No chats monitored."))
+            return
+
+    async def _run() -> None:
+        for jid in targets:
+            name = next((c["name"] for c in _last_chats if c["jid"] == jid), jid)
+            print(_c(DIM, f"Fetching {name}..."))
+            await _poll_one(jid, checkpoints, config, db_path, api_url, force=True)
+
+    asyncio.get_event_loop().create_task(_run())
+
+
 def _cmd_debug(args: list[str], db_path: str, checkpoints: WhatsappCheckpoints) -> None:
     """Show raw DB state for a JID to diagnose polling issues."""
     if not args:
@@ -673,6 +698,8 @@ async def _command_loop(
             _cmd_notify(args, config, api_url)
         elif cmd in ("help", "?", "h"):
             _cmd_help()
+        elif cmd == "fetch":
+            _cmd_fetch(args, config, checkpoints, db_path, api_url)
         elif cmd == "debug":
             _cmd_debug(args, db_path, checkpoints)
         else:
