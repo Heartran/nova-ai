@@ -469,6 +469,54 @@ def _cmd_interval(args: list[str], config: WatchConfig) -> None:
     print(_c(GREEN, f"✓ Intervallo impostato a {val}s"))
 
 
+_DEFAULT_NOTIFY_MSG = "👋 Ciao! Sono Nova, sono in ascolto qui. Scrivimi pure."
+
+
+def _cmd_notify(args: list[str], config: WatchConfig, api_url: str) -> None:
+    """Invia un messaggio di avviso a una chat monitorata (o a tutte se senza argomenti)."""
+    watched = config.watched_jids
+    if not watched:
+        print(_c(YELLOW, "Nessuna chat monitorata. Usa 'watch' prima."))
+        return
+
+    # Argomento opzionale: JID/numero/nome specifico
+    if args:
+        raw = " ".join(args)
+        # Potrebbe essere un numero indice della lista 'list'
+        if raw.isdigit():
+            idx = int(raw) - 1
+            if 0 <= idx < len(watched):
+                targets = [watched[idx]]
+            else:
+                print(_c(RED, f"Numero {raw} non valido (hai {len(watched)} chat monitorate)."))
+                return
+        elif "@" in raw:
+            if raw not in watched:
+                print(_c(YELLOW, f"'{raw}' non è nella lista monitorata."))
+                return
+            targets = [raw]
+        else:
+            # Substring match sul nome
+            matches = [
+                j for j in watched
+                if raw.lower() in next((c["name"] for c in _last_chats if c["jid"] == j), j).lower()
+            ]
+            if not matches:
+                print(_c(RED, f"Nessuna chat monitorata corrisponde a '{raw}'."))
+                return
+            targets = matches
+    else:
+        targets = list(watched)
+
+    for jid in targets:
+        name = next((c["name"] for c in _last_chats if c["jid"] == jid), jid)
+        ok = _send_via_bridge(api_url, jid, _DEFAULT_NOTIFY_MSG)
+        if ok:
+            print(_c(GREEN, f"✓ Avviso inviato a {_c(BOLD, name)}"))
+        else:
+            print(_c(RED, f"✗ Invio fallito per {_c(BOLD, name)} ({jid})"))
+
+
 def _cmd_help() -> None:
     print(f"""
 {_c(BOLD, "Comandi disponibili:")}
@@ -479,6 +527,7 @@ def _cmd_help() -> None:
   {_c(CYAN, "list")}               Mostra le chat attualmente monitorate
   {_c(CYAN, "status")}             Stato del server, bridge e config
   {_c(CYAN, "interval <n>")}       Cambia l'intervallo di polling (secondi)
+  {_c(CYAN, "notify [jid|n]")}     Invia avviso "Nova è in ascolto" (tutte le chat o una sola)
   {_c(CYAN, "help")}               Mostra questo help
   {_c(CYAN, "quit")} / {_c(CYAN, "exit")}        Arresta il server
 
@@ -520,6 +569,8 @@ async def _command_loop(
             _cmd_status(config, db_path, api_url)
         elif cmd == "interval":
             _cmd_interval(args, config)
+        elif cmd == "notify":
+            _cmd_notify(args, config, api_url)
         elif cmd in ("help", "?", "h"):
             _cmd_help()
         else:
