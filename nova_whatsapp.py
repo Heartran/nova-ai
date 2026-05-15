@@ -162,6 +162,14 @@ def _fetch_new_messages(db_path: str, chat_jid: str, after: datetime | None, lim
         placeholders = ",".join("?" * len(jids))
         conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=0&cache=private", uri=True)
         cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(chats)")
+        has_lid = any(row[1] == "lid" for row in cursor.fetchall())
+        name_expr = (
+            "COALESCE((SELECT name FROM chats WHERE jid = m.chat_jid),"
+            "(SELECT name FROM chats WHERE lid = m.chat_jid), m.chat_jid)"
+            if has_lid else
+            "COALESCE((SELECT name FROM chats WHERE jid = m.chat_jid), m.chat_jid)"
+        )
         params: list = list(jids)
         after_clause = ""
         if after is not None:
@@ -169,12 +177,7 @@ def _fetch_new_messages(db_path: str, chat_jid: str, after: datetime | None, lim
             params.append(int(after.timestamp()))
         cursor.execute(
             f"""
-            SELECT m.id, m.timestamp, m.sender, m.content, m.is_from_me,
-                   COALESCE(
-                       (SELECT name FROM chats WHERE jid = m.chat_jid),
-                       (SELECT name FROM chats WHERE lid = m.chat_jid),
-                       m.chat_jid
-                   ) as chat_name
+            SELECT m.id, m.timestamp, m.sender, m.content, m.is_from_me, {name_expr} as chat_name
             FROM messages m
             WHERE m.chat_jid IN ({placeholders}) {after_clause}
               AND m.is_from_me = 0
@@ -211,14 +214,17 @@ def _fetch_history(db_path: str, chat_jid: str, before_iso: str, limit: int, con
         placeholders = ",".join("?" * len(jids))
         conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=0&cache=private", uri=True)
         cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(chats)")
+        has_lid = any(row[1] == "lid" for row in cursor.fetchall())
+        name_expr = (
+            "COALESCE((SELECT name FROM chats WHERE jid = m.chat_jid),"
+            "(SELECT name FROM chats WHERE lid = m.chat_jid), m.chat_jid)"
+            if has_lid else
+            "COALESCE((SELECT name FROM chats WHERE jid = m.chat_jid), m.chat_jid)"
+        )
         cursor.execute(
             f"""
-            SELECT m.id, m.timestamp, m.sender, m.content, m.is_from_me,
-                   COALESCE(
-                       (SELECT name FROM chats WHERE jid = m.chat_jid),
-                       (SELECT name FROM chats WHERE lid = m.chat_jid),
-                       m.chat_jid
-                   ) as chat_name
+            SELECT m.id, m.timestamp, m.sender, m.content, m.is_from_me, {name_expr} as chat_name
             FROM messages m
             WHERE m.chat_jid IN ({placeholders})
               AND CAST(strftime('%s', m.timestamp) AS INTEGER) < CAST(strftime('%s', ?) AS INTEGER)
