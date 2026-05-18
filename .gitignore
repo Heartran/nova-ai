@@ -11,3 +11,4 @@ venv/
 
 # Claude Code — impostazioni locali (permessi per-utente, non committare)
 .claude/settings.local.json
+.claude/worktrees/
