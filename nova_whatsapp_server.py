@@ -449,38 +449,39 @@ def _print_log(msg: str) -> None:
 
 def _list_chats_from_db(db_path: str, query_str: str = "", limit: int = 30) -> list[dict]:
     """Read available chats from the bridge DB."""
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=0&cache=private", uri=True)
     try:
-        cursor = conn.cursor()
-        search = f"%{query_str}%" if query_str else "%"
-        cursor.execute(
-            """
-            SELECT c.jid, c.name, c.last_message_time,
-                   (SELECT content FROM messages
-                    WHERE chat_jid = c.jid
-                    ORDER BY timestamp DESC LIMIT 1) as last_msg
-            FROM chats c
-            WHERE (c.name LIKE ? OR c.jid LIKE ?)
-            ORDER BY COALESCE(c.last_message_time, 0) DESC
-            LIMIT ?
-            """,
-            [search, search, limit],
-        )
-        rows = cursor.fetchall()
-        return [
-            {
-                "jid": r[0],
-                "name": r[1] or r[0],
-                "last_time": r[2] or "",
-                "last_msg": (r[3] or "")[:60],
-            }
-            for r in rows
-        ]
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=0&cache=private", uri=True)
+        try:
+            cursor = conn.cursor()
+            search = f"%{query_str}%" if query_str else "%"
+            cursor.execute(
+                """
+                SELECT c.jid, c.name, c.last_message_time,
+                       (SELECT content FROM messages
+                        WHERE chat_jid = c.jid
+                        ORDER BY timestamp DESC LIMIT 1) as last_msg
+                FROM chats c
+                WHERE (c.name LIKE ? OR c.jid LIKE ?)
+                ORDER BY COALESCE(c.last_message_time, 0) DESC
+                LIMIT ?
+                """,
+                [search, search, limit],
+            )
+            rows = cursor.fetchall()
+            return [
+                {
+                    "jid": r[0],
+                    "name": r[1] or r[0],
+                    "last_time": r[2] or "",
+                    "last_msg": (r[3] or "")[:60],
+                }
+                for r in rows
+            ]
+        finally:
+            conn.close()
     except sqlite3.Error as e:
         print(_c(RED, f"DB error: {e}"))
         return []
-    finally:
-        conn.close()
 
 
 def _resolve_jid(arg: str, config: WatchConfig, db_path: str) -> str | None:
