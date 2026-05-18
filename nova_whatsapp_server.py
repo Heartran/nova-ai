@@ -304,6 +304,7 @@ async def _poll_loop(
     db_path: str,
     api_url: str,
     stop_event: asyncio.Event,
+    wakeup_event: asyncio.Event | None = None,
 ) -> None:
     """Runs in the background until stop_event is set."""
     logging.getLogger("nova.whatsapp").setLevel(logging.WARNING)  # silent in CLI
@@ -328,10 +329,46 @@ async def _poll_loop(
             _print_log(_c(DIM, f"[{ts}] polling... ({poll_count} cycles, {len(jids)} chats)"))
 
         interval = config.poll_interval
+        if wakeup_event is not None:
+            wakeup_event.clear()
+            try:
+                await asyncio.wait_for(wakeup_event.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
+        else:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
+
+
+async def _wal_watcher(
+    db_path: str,
+    wakeup_event: asyncio.Event,
+    stop_event: asyncio.Event,
+) -> None:
+    """Watch messages.db-wal for mtime changes; trigger immediate poll on change."""
+    wal_path = Path(str(db_path) + "-wal")
+    last_mtime: float = 0.0
+    CHECK_INTERVAL = 0.1  # 100 ms
+
+    while not stop_event.is_set():
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=interval)
+            if wal_path.is_file():
+                mtime = wal_path.stat().st_mtime
+                if mtime != last_mtime:
+                    if last_mtime > 0:  # skip initial detection
+                        wakeup_event.set()
+                    last_mtime = mtime
+        except OSError:
+            pass
+
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=CHECK_INTERVAL)
         except asyncio.TimeoutError:
             pass
+
+    wakeup_event.set()  # unblock poll loop so it can exit cleanly
 
 
 async def _poll_one(
@@ -1072,8 +1109,10 @@ async def _main(db_path: str, api_url: str, interval_override: float | None = No
 
     _banner(db_path)
 
+    wakeup_event = asyncio.Event()
     await asyncio.gather(
-        _poll_loop(config, checkpoints, db_path, api_url, stop_event),
+        _poll_loop(config, checkpoints, db_path, api_url, stop_event, wakeup_event),
+        _wal_watcher(db_path, wakeup_event, stop_event),
         _command_loop(config, checkpoints, stop_event, db_path, api_url),
     )
 
