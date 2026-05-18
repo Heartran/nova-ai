@@ -25,7 +25,7 @@ class ChannelCheckpoints:
 
     def __init__(self, path: Path):
         self.path = path
-        self.data: dict[str, dict] = {}
+        self._data: dict[str, dict] = {}
         self._lock = Lock()
         self._load()
 
@@ -33,18 +33,18 @@ class ChannelCheckpoints:
         if not self.path.exists():
             return
         try:
-            self.data = json.loads(self.path.read_text(encoding="utf-8"))
-            logger.info("Loaded %d checkpoints from %s", len(self.data), self.path)
+            self._data = json.loads(self.path.read_text(encoding="utf-8"))
+            logger.info("Loaded %d checkpoints from %s", len(self._data), self.path)
         except (OSError, json.JSONDecodeError) as e:
             logger.error("Error loading checkpoints %s: %s", self.path, e)
-            self.data = {}
+            self._data = {}
 
     def _save(self) -> None:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_suffix(".json.tmp")
             tmp.write_text(
-                json.dumps(self.data, indent=2, ensure_ascii=False),
+                json.dumps(self._data, indent=2, ensure_ascii=False),
                 encoding="utf-8",
             )
             tmp.replace(self.path)  # atomic on Windows and POSIX
@@ -52,10 +52,10 @@ class ChannelCheckpoints:
             logger.error("Error saving checkpoints: %s", e)
 
     def is_tracked(self, channel_id: int) -> bool:
-        return str(channel_id) in self.data
+        return str(channel_id) in self._data
 
     def get(self, channel_id: int) -> datetime | None:
-        entry = self.data.get(str(channel_id))
+        entry = self._data.get(str(channel_id))
         if not entry:
             return None
         try:
@@ -64,7 +64,7 @@ class ChannelCheckpoints:
             return None
 
     def get_entry(self, channel_id: int) -> dict | None:
-        return self.data.get(str(channel_id))
+        return self._data.get(str(channel_id))
 
     def update(
         self,
@@ -74,7 +74,7 @@ class ChannelCheckpoints:
         scope_id: int,
     ) -> None:
         with self._lock:
-            self.data[str(channel_id)] = {
+            self._data[str(channel_id)] = {
                 "scope": scope_type,
                 "scope_id": int(scope_id),
                 "last_seen": message_time.astimezone(timezone.utc).isoformat(),
@@ -82,4 +82,4 @@ class ChannelCheckpoints:
             self._save()
 
     def channel_ids(self) -> list[int]:
-        return [int(k) for k in self.data.keys()]
+        return [int(k) for k in self._data.keys()]

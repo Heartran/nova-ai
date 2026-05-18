@@ -55,16 +55,16 @@ from memory import (
 from nova_mcp import build_memory_server
 from nova_whatsapp import (
     WhatsappCheckpoints,
-    _build_messages_for_claude,
-    _call_claude_wa,
-    _download_audio,
-    _fetch_history,
-    _fetch_new_messages,
-    _fetch_tail,
-    _resolve_jid_variants,
-    _send_via_bridge,
-    _serialize_history_wa,
-    _transcribe_audio_file,
+    build_messages_for_claude,
+    call_claude_wa,
+    download_audio,
+    fetch_history,
+    fetch_new_messages,
+    fetch_tail,
+    resolve_jid_variants,
+    send_via_bridge,
+    serialize_history_wa,
+    transcribe_audio_file,
 )
 from personality import build_system_prompt
 
@@ -352,16 +352,16 @@ async def _poll_one(
             return
         last_seen = datetime.now(timezone.utc) - timedelta(hours=24)
 
-    new_msgs = await asyncio.to_thread(_fetch_new_messages, db_path, jid, last_seen, 50, _CONTACT_MAP)
+    new_msgs = await asyncio.to_thread(fetch_new_messages, db_path, jid, last_seen, 50, _CONTACT_MAP)
     if not new_msgs:
         return
 
     # Transcribe any voice messages before building context
     for msg in new_msgs:
         if msg.get("media_type") == "audio" and not msg.get("content"):
-            local_path = await asyncio.to_thread(_download_audio, api_url, msg["id"], jid)
+            local_path = await asyncio.to_thread(download_audio, api_url, msg["id"], jid)
             if local_path:
-                transcript = await asyncio.to_thread(_transcribe_audio_file, local_path)
+                transcript = await asyncio.to_thread(transcribe_audio_file, local_path)
                 msg["content"] = f"[vocale: {transcript}]" if transcript else "[vocale: trascrizione non riuscita]"
             else:
                 msg["content"] = "[vocale: download non riuscito]"
@@ -381,7 +381,7 @@ async def _poll_one(
     checkpoints.update(jid, latest_ts)
 
     # Prefer the JID variant that already has a memory folder (LID migration).
-    jid_variants = await asyncio.to_thread(_resolve_jid_variants, db_path, jid, _CONTACT_MAP)
+    jid_variants = await asyncio.to_thread(resolve_jid_variants, db_path, jid, _CONTACT_MAP)
     scope_jid = next(
         (v for v in jid_variants if scope_dir_for(NOVA_MEMORY_DIR, "whatsapp", v).exists()),
         jid,
@@ -393,9 +393,9 @@ async def _poll_one(
     user_mem = load_user_memory(USER_MEMORY_DIR) if USER_MEMORY_DIR.exists() else ""
 
     history = await asyncio.to_thread(
-        _fetch_history, db_path, jid, new_msgs[0]["timestamp"], config.history_limit, _CONTACT_MAP
+        fetch_history, db_path, jid, new_msgs[0]["timestamp"], config.history_limit, _CONTACT_MAP
     )
-    messages = _build_messages_for_claude(history, new_msgs)
+    messages = build_messages_for_claude(history, new_msgs)
     chat_name = new_msgs[0].get("chat_name") or jid
 
     system_prompt = build_system_prompt(
@@ -416,7 +416,7 @@ async def _poll_one(
         + (_c(DIM, " [thinking]") if chat_cfg.get("thinking") else "")
     )
 
-    reply = await _call_claude_wa(
+    reply = await call_claude_wa(
         system_prompt,
         messages,
         memory_server,
@@ -429,7 +429,7 @@ async def _poll_one(
         _print_log(_c(YELLOW, f"[{chat_name}] Empty response from Claude"))
         return
 
-    ok = await asyncio.to_thread(_send_via_bridge, api_url, jid, reply)
+    ok = await asyncio.to_thread(send_via_bridge, api_url, jid, reply)
     status = _c(GREEN, "OK") if ok else _c(RED, "FAIL")
     _print_log(f"{status} [{chat_name}] Reply sent ({len(reply)} chars)")
 
@@ -449,8 +449,8 @@ def _print_log(msg: str) -> None:
 
 def _list_chats_from_db(db_path: str, query_str: str = "", limit: int = 30) -> list[dict]:
     """Read available chats from the bridge DB."""
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=0&cache=private", uri=True)
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=0&cache=private", uri=True)
         cursor = conn.cursor()
         search = f"%{query_str}%" if query_str else "%"
         cursor.execute(
@@ -480,8 +480,7 @@ def _list_chats_from_db(db_path: str, query_str: str = "", limit: int = 30) -> l
         print(_c(RED, f"DB error: {e}"))
         return []
     finally:
-        if "conn" in locals():
-            conn.close()  # type: ignore[possibly-undefined]
+        conn.close()
 
 
 def _resolve_jid(arg: str, config: WatchConfig, db_path: str) -> str | None:
@@ -755,13 +754,16 @@ def _cmd_notify(args: list[str], config: WatchConfig, api_url: str) -> None:
     else:
         targets = list(watched)
 
-    for jid in targets:
-        name = next((c["name"] for c in _last_chats if c["jid"] == jid), jid)
-        ok = _send_via_bridge(api_url, jid, _DEFAULT_NOTIFY_MSG)
-        if ok:
-            print(_c(GREEN, f"Notification sent to {_c(BOLD, name)}"))
-        else:
-            print(_c(RED, f"Send failed for {_c(BOLD, name)} ({jid})"))
+    async def _run() -> None:
+        for jid in targets:
+            name = next((c["name"] for c in _last_chats if c["jid"] == jid), jid)
+            ok = await asyncio.to_thread(send_via_bridge, api_url, jid, _DEFAULT_NOTIFY_MSG)
+            if ok:
+                _print_log(_c(GREEN, f"Notification sent to {_c(BOLD, name)}"))
+            else:
+                _print_log(_c(RED, f"Send failed for {_c(BOLD, name)} ({jid})"))
+
+    asyncio.get_running_loop().create_task(_run())
 
 
 def _cmd_fetch(args: list[str], config: WatchConfig, checkpoints: WhatsappCheckpoints, db_path: str, api_url: str) -> None:
@@ -790,7 +792,7 @@ def _cmd_fetch(args: list[str], config: WatchConfig, checkpoints: WhatsappCheckp
     async def _run() -> None:
         for jid in targets:
             name = next((c["name"] for c in _last_chats if c["jid"] == jid), jid)
-            tail = await asyncio.to_thread(_fetch_tail, db_path, jid, 40, _CONTACT_MAP)
+            tail = await asyncio.to_thread(fetch_tail, db_path, jid, 40, _CONTACT_MAP)
             if not tail:
                 print(_c(YELLOW, f"[{name}] No messages found."))
                 continue
@@ -813,9 +815,9 @@ def _cmd_fetch(args: list[str], config: WatchConfig, checkpoints: WhatsappCheckp
             # Build context: history before the last inbound + unanswered messages
             unanswered = [m for m in tail[last_inbound_idx:] if not m["is_from_me"]]
             history = tail[:last_inbound_idx]
-            messages = _build_messages_for_claude(history, unanswered)
+            messages = build_messages_for_claude(history, unanswered)
 
-            jid_variants = await asyncio.to_thread(_resolve_jid_variants, db_path, jid, _CONTACT_MAP)
+            jid_variants = await asyncio.to_thread(resolve_jid_variants, db_path, jid, _CONTACT_MAP)
             scope_jid = next(
                 (v for v in jid_variants if scope_dir_for(NOVA_MEMORY_DIR, "whatsapp", v).exists()),
                 jid,
@@ -834,7 +836,7 @@ def _cmd_fetch(args: list[str], config: WatchConfig, checkpoints: WhatsappCheckp
                 _c(CYAN, f"[{name}] Fetching — generating reply...")
                 + (_c(DIM, " [thinking]") if chat_cfg.get("thinking") else "")
             )
-            reply = await _call_claude_wa(
+            reply = await call_claude_wa(
                 system_prompt,
                 messages,
                 memory_server,
@@ -846,7 +848,7 @@ def _cmd_fetch(args: list[str], config: WatchConfig, checkpoints: WhatsappCheckp
                 _print_log(_c(YELLOW, f"[{name}] Empty response from Claude."))
                 continue
 
-            ok = await asyncio.to_thread(_send_via_bridge, api_url, jid, reply)
+            ok = await asyncio.to_thread(send_via_bridge, api_url, jid, reply)
             status = _c(GREEN, "OK") if ok else _c(RED, "FAIL")
             _print_log(f"{status} [{name}] Reply sent ({len(reply)} chars)")
 
@@ -859,7 +861,7 @@ def _cmd_fetch(args: list[str], config: WatchConfig, checkpoints: WhatsappCheckp
                 latest_ts = datetime.now(timezone.utc)
             checkpoints.update(jid, latest_ts)
 
-    asyncio.get_event_loop().create_task(_run())
+    asyncio.get_running_loop().create_task(_run())
 
 
 def _cmd_debug(args: list[str], db_path: str, checkpoints: WhatsappCheckpoints) -> None:
@@ -872,13 +874,15 @@ def _cmd_debug(args: list[str], db_path: str, checkpoints: WhatsappCheckpoints) 
     print(f"\n  Checkpoint:  {checkpoint.isoformat() if checkpoint else _c(YELLOW, 'None (first run)')}")
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=0&cache=private", uri=True)
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT id, timestamp, sender, content FROM messages WHERE chat_jid = ? ORDER BY rowid DESC LIMIT 3",
-            [jid],
-        )
-        rows = cursor.fetchall()
-        conn.close()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, timestamp, sender, content FROM messages WHERE chat_jid = ? ORDER BY rowid DESC LIMIT 3",
+                [jid],
+            )
+            rows = cursor.fetchall()
+        finally:
+            conn.close()
         if not rows:
             print(_c(YELLOW, f"  No messages found for {jid}"))
             return
@@ -909,7 +913,7 @@ def _cmd_context(args: list[str], config: WatchConfig, db_path: str) -> None:
 
     async def _run() -> None:
         name = next((c["name"] for c in _last_chats if c["jid"] == jid), jid)
-        tail = await asyncio.to_thread(_fetch_tail, db_path, jid, 40, _CONTACT_MAP)
+        tail = await asyncio.to_thread(fetch_tail, db_path, jid, 40, _CONTACT_MAP)
         if not tail:
             print(_c(YELLOW, f"[{name}] No messages in DB."))
             return
@@ -923,8 +927,8 @@ def _cmd_context(args: list[str], config: WatchConfig, db_path: str) -> None:
 
         unanswered = [m for m in tail[last_inbound_idx:] if not m["is_from_me"]]
         history = tail[:last_inbound_idx]
-        messages = _build_messages_for_claude(history, unanswered)
-        prompt = _serialize_history_wa(messages)
+        messages = build_messages_for_claude(history, unanswered)
+        prompt = serialize_history_wa(messages)
 
         print(f"\n{_c(BOLD, f'[{name}] Context that would be sent to Claude:')}")
         print(f"{_c(DIM, '─' * 60)}")
@@ -933,7 +937,7 @@ def _cmd_context(args: list[str], config: WatchConfig, db_path: str) -> None:
         print(prompt)
         print(f"{_c(DIM, '─' * 60)}\n")
 
-    asyncio.get_event_loop().create_task(_run())
+    asyncio.get_running_loop().create_task(_run())
 
 
 def _cmd_help() -> None:
@@ -968,7 +972,7 @@ async def _command_loop(
     db_path: str,
     api_url: str,
 ) -> None:
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     while not stop_event.is_set():
         try:
             raw = await loop.run_in_executor(None, lambda: input(_c(DIM, "wa> ")))
@@ -1058,7 +1062,7 @@ async def _main(db_path: str, api_url: str, interval_override: float | None = No
     stop_event = asyncio.Event()
 
     # Graceful Ctrl+C handling
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             loop.add_signal_handler(sig, stop_event.set)
