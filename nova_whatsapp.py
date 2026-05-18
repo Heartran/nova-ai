@@ -20,7 +20,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sqlite3
+import tempfile
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
@@ -177,11 +180,15 @@ def _fetch_new_messages(db_path: str, chat_jid: str, after: datetime | None, lim
             params.append(int(after.timestamp()))
         cursor.execute(
             f"""
-            SELECT m.id, m.timestamp, m.sender, m.content, m.is_from_me, {name_expr} as chat_name
+            SELECT m.id, m.timestamp, m.sender, m.content, m.is_from_me, {name_expr} as chat_name,
+                   COALESCE(m.media_type, '') as media_type
             FROM messages m
             WHERE m.chat_jid IN ({placeholders}) {after_clause}
               AND m.is_from_me = 0
-              AND m.content IS NOT NULL AND m.content != ''
+              AND (
+                  (m.content IS NOT NULL AND m.content != '')
+                  OR COALESCE(m.media_type, '') = 'audio'
+              )
             ORDER BY m.timestamp ASC
             LIMIT ?
             """,
@@ -193,9 +200,10 @@ def _fetch_new_messages(db_path: str, chat_jid: str, after: datetime | None, lim
                 "id": r[0],
                 "timestamp": r[1],
                 "sender": r[2],
-                "content": r[3],
+                "content": r[3] or "",
                 "is_from_me": bool(r[4]),
                 "chat_name": r[5] or chat_jid,
+                "media_type": r[6],
             }
             for r in rows
         ]
@@ -323,6 +331,71 @@ def _send_via_bridge(api_url: str, recipient_jid: str, text: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Audio download + transcription
+# ---------------------------------------------------------------------------
+
+def _download_audio(api_url: str, msg_id: str, chat_jid: str) -> str | None:
+    """Download an audio message via the bridge and return the local file path."""
+    try:
+        resp = requests.post(
+            f"{api_url}/download",
+            json={"message_id": msg_id, "chat_jid": chat_jid},
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("success"):
+                return data.get("path")
+        logger.error("Bridge download HTTP %s for %s: %s", resp.status_code, msg_id, resp.text[:200])
+        return None
+    except requests.RequestException as e:
+        logger.error("HTTP error downloading audio (%s): %s", msg_id, e)
+        return None
+
+
+def _transcribe_audio_file(file_path: str) -> str | None:
+    """Transcribe an audio file via Groq or OpenAI Whisper API."""
+    provider = os.getenv("WHISPER_PROVIDER", "groq").lower()
+    if provider == "groq":
+        api_key = os.getenv("GROQ_API_KEY", "")
+        url = "https://api.groq.com/openai/v1/audio/transcriptions"
+        model = "whisper-large-v3-turbo"
+    else:
+        api_key = os.getenv("OPENAI_API_KEY", "")
+        url = "https://api.openai.com/v1/audio/transcriptions"
+        model = "whisper-1"
+
+    if not api_key:
+        logger.warning("No API key for Whisper transcription (provider=%s)", provider)
+        return None
+
+    p = Path(file_path)
+    ext = p.suffix.lstrip(".") or "ogg"
+    mime = {
+        "ogg": "audio/ogg", "mp3": "audio/mpeg", "mp4": "audio/mp4",
+        "m4a": "audio/mp4", "wav": "audio/wav", "webm": "audio/webm",
+        "flac": "audio/flac",
+    }.get(ext, "audio/ogg")
+
+    try:
+        with open(file_path, "rb") as f:
+            resp = requests.post(
+                url,
+                headers={"Authorization": f"Bearer {api_key}"},
+                files={"file": (p.name, f, mime)},
+                data={"model": model, "response_format": "text"},
+                timeout=60,
+            )
+        if resp.status_code == 200:
+            return resp.text.strip()
+        logger.error("Whisper API error %s: %s", resp.status_code, resp.text[:300])
+        return None
+    except Exception as e:
+        logger.error("Error transcribing audio %s: %s", file_path, e)
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Build messages for Claude
 # ---------------------------------------------------------------------------
 
@@ -381,23 +454,53 @@ async def _call_claude_wa(
     messages: list[dict],
     memory_server,
     model: str,
+    *,
+    thinking: bool = False,
+    extra_mcp_servers: dict | None = None,
 ) -> str:
     prompt = _serialize_history_wa(messages)
-    options = ClaudeAgentOptions(
-        system_prompt=system,
-        model=model,
-        mcp_servers={"nova_memory": memory_server},
-        allowed_tools=_WA_ALLOWED_TOOLS,
-        max_turns=6,
-        setting_sources=[],
-    )
-    parts: list[str] = []
-    async for msg in query(prompt=prompt, options=options):
-        if isinstance(msg, AssistantMessage):
-            for block in msg.content:
-                if isinstance(block, TextBlock):
-                    parts.append(block.text)
-    return "\n".join(parts).strip()
+
+    mcp_servers: dict = {"nova_memory": memory_server}
+    if extra_mcp_servers:
+        mcp_servers.update(extra_mcp_servers)
+
+    allowed_tools = list(_WA_ALLOWED_TOOLS)
+    if extra_mcp_servers:
+        for name in extra_mcp_servers:
+            allowed_tools.append(f"mcp__{name}__*")
+
+    betas = ["interleaved-thinking-2025-05-14"] if thinking else None
+    # Thinking requires a minimum budget; 8000 tokens is a sensible default.
+    max_turns = 10 if thinking else 6
+
+    # Write system prompt to a temp file to avoid WinError 206 (asyncio
+    # subprocess fails with very long command lines on Windows).
+    sp_fd, sp_path = tempfile.mkstemp(suffix=".txt", prefix="nova_sp_")
+    try:
+        with os.fdopen(sp_fd, "w", encoding="utf-8") as f:
+            f.write(system)
+
+        options = ClaudeAgentOptions(
+            system_prompt={"type": "file", "path": sp_path},
+            model=model,
+            mcp_servers=mcp_servers,
+            allowed_tools=allowed_tools,
+            max_turns=max_turns,
+            setting_sources=[],
+            betas=betas,
+        )
+        parts: list[str] = []
+        async for msg in query(prompt=prompt, options=options):
+            if isinstance(msg, AssistantMessage):
+                if msg.error:
+                    raise RuntimeError(f"Claude API error: {msg.error}")
+                for block in msg.content:
+                    if isinstance(block, TextBlock):
+                        parts.append(block.text)
+        return "\n".join(parts).strip()
+    finally:
+        with suppress(Exception):
+            os.unlink(sp_path)
 
 
 # ---------------------------------------------------------------------------

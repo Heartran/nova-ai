@@ -19,7 +19,9 @@ import logging
 import os
 import re
 import sys
+import tempfile
 import time
+from contextlib import suppress
 from pathlib import Path
 
 import discord
@@ -332,30 +334,45 @@ async def call_claude(system: str, messages: list[dict], memory_server, read_ser
     """Async call via claude-agent-sdk with scoped memory_server + read_server + web tool auditing."""
     prompt = _serialize_history(messages)
 
+    # Write system prompt to a temp file to avoid WinError 206 (asyncio
+    # subprocess fails with very long command lines on Windows).
+    sp_fd, sp_path = tempfile.mkstemp(suffix=".txt", prefix="nova_sp_")
+    with os.fdopen(sp_fd, "w", encoding="utf-8") as f:
+        f.write(system)
+
+    def _stderr_log(line: str) -> None:
+        logger.warning("Claude CLI stderr: %s", line)
+
     options = ClaudeAgentOptions(
-        system_prompt=system,
+        system_prompt={"type": "file", "path": sp_path},
         model=CLAUDE_MODEL,
         mcp_servers={"nova_memory": memory_server, "nova_read": read_server},
         allowed_tools=ALL_TOOLS,
         max_turns=8,  # more headroom: web tool + read tool + final answer = several turns
         can_use_tool=can_use_tool,
         setting_sources=[],
+        stderr=_stderr_log,
         # NOTE: no permission_mode="bypassPermissions" — that mode skips the
         # can_use_tool callback, losing the audit. allowed_tools + can_use_tool
         # are enough: anything not in the list is rejected by the SDK.
     )
 
     async def _prompt_stream():
-        yield prompt
+        yield {"type": "user", "session_id": "", "message": {"role": "user", "content": prompt}, "parent_tool_use_id": None}
 
-    output_parts: list[str] = []
-    async for msg in query(prompt=_prompt_stream(), options=options):
-        if isinstance(msg, AssistantMessage):
-            for block in msg.content:
-                if isinstance(block, TextBlock):
-                    output_parts.append(block.text)
-
-    return "\n".join(output_parts).strip()
+    try:
+        output_parts: list[str] = []
+        async for msg in query(prompt=_prompt_stream(), options=options):
+            if isinstance(msg, AssistantMessage):
+                if msg.error:
+                    raise RuntimeError(f"Claude API error: {msg.error}")
+                for block in msg.content:
+                    if isinstance(block, TextBlock):
+                        output_parts.append(block.text)
+        return "\n".join(output_parts).strip()
+    finally:
+        with suppress(Exception):
+            os.unlink(sp_path)
 
 
 # -----------------------------------------------------------------------------
@@ -413,6 +430,7 @@ async def handle_message(message: discord.Message) -> None:
 
         if not reply:
             logger.warning("Claude returned an empty response")
+            await message.reply("Non riesco a rispondere in questo momento, riprova tra un po'.", mention_author=False)
             return
 
         chunks = split_for_discord(reply, MAX_RESPONSE_CHARS)

@@ -57,12 +57,14 @@ from nova_whatsapp import (
     WhatsappCheckpoints,
     _build_messages_for_claude,
     _call_claude_wa,
+    _download_audio,
     _fetch_history,
     _fetch_new_messages,
     _fetch_tail,
     _resolve_jid_variants,
     _send_via_bridge,
     _serialize_history_wa,
+    _transcribe_audio_file,
 )
 from personality import build_system_prompt
 
@@ -165,26 +167,41 @@ def _c(color: str, text: str) -> str:
 # ---------------------------------------------------------------------------
 
 class WatchConfig:
-    """Persistent config: watched JIDs + server settings."""
+    """Persistent config: watched JIDs + server settings + per-chat options.
+
+    Files (both in the same directory as `path`):
+      whatsapp_config.json  — watched JIDs, poll settings, per-chat flags
+      whatsapp_mcp.json     — global extra MCP servers (separate for easy editing)
+    """
 
     def __init__(self, path: Path) -> None:
         self.path = path
+        self.mcp_path = path.with_name("whatsapp_mcp.json")
         self._jids: list[str] = []
         self.poll_interval: float = DEFAULT_POLL_INTERVAL
         self.history_limit: int = DEFAULT_HISTORY_LIMIT
+        # Global extra MCP servers: name → config dict (used for all chats)
+        self._mcp_servers: dict[str, dict] = {}
+        # Per-chat overrides: jid → {"thinking": bool}
+        self._chat_configs: dict[str, dict] = {}
         self._lock = Lock()
         self._load()
 
     def _load(self) -> None:
-        if not self.path.exists():
-            return
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-            self._jids = data.get("watched_jids", [])
-            self.poll_interval = float(data.get("poll_interval", DEFAULT_POLL_INTERVAL))
-            self.history_limit = int(data.get("history_limit", DEFAULT_HISTORY_LIMIT))
-        except (OSError, json.JSONDecodeError, ValueError) as e:
-            print(_c(YELLOW, f"[warn] Failed to load config: {e}"))
+        if self.path.exists():
+            try:
+                data = json.loads(self.path.read_text(encoding="utf-8"))
+                self._jids = data.get("watched_jids", [])
+                self.poll_interval = float(data.get("poll_interval", DEFAULT_POLL_INTERVAL))
+                self.history_limit = int(data.get("history_limit", DEFAULT_HISTORY_LIMIT))
+                self._chat_configs = data.get("chat_configs", {})
+            except (OSError, json.JSONDecodeError, ValueError) as e:
+                print(_c(YELLOW, f"[warn] Failed to load config: {e}"))
+        if self.mcp_path.exists():
+            try:
+                self._mcp_servers = json.loads(self.mcp_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as e:
+                print(_c(YELLOW, f"[warn] Failed to load MCP config: {e}"))
 
     def _save(self) -> None:
         try:
@@ -196,6 +213,7 @@ class WatchConfig:
                         "watched_jids": self._jids,
                         "poll_interval": self.poll_interval,
                         "history_limit": self.history_limit,
+                        "chat_configs": self._chat_configs,
                     },
                     indent=2,
                     ensure_ascii=False,
@@ -206,10 +224,27 @@ class WatchConfig:
         except OSError as e:
             print(_c(RED, f"[error] Failed to save config: {e}"))
 
+    def _save_mcp(self) -> None:
+        try:
+            self.mcp_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.mcp_path.with_suffix(".json.tmp")
+            tmp.write_text(
+                json.dumps(self._mcp_servers, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            tmp.replace(self.mcp_path)
+        except OSError as e:
+            print(_c(RED, f"[error] Failed to save MCP config: {e}"))
+
     @property
     def watched_jids(self) -> list[str]:
         with self._lock:
             return list(self._jids)
+
+    @property
+    def mcp_servers(self) -> dict[str, dict]:
+        with self._lock:
+            return dict(self._mcp_servers)
 
     def add(self, jid: str) -> bool:
         with self._lock:
@@ -230,6 +265,32 @@ class WatchConfig:
     def set_interval(self, seconds: float) -> None:
         with self._lock:
             self.poll_interval = seconds
+            self._save()
+
+    def add_mcp_server(self, name: str, cfg: dict) -> None:
+        with self._lock:
+            self._mcp_servers[name] = cfg
+            self._save_mcp()
+
+    def remove_mcp_server(self, name: str) -> bool:
+        with self._lock:
+            if name not in self._mcp_servers:
+                return False
+            del self._mcp_servers[name]
+            self._save_mcp()
+            return True
+
+    # ------------------------------------------------------------------
+    # Per-chat config helpers
+    # ------------------------------------------------------------------
+
+    def get_chat_config(self, jid: str) -> dict:
+        with self._lock:
+            return dict(self._chat_configs.get(jid, {}))
+
+    def set_thinking(self, jid: str, enabled: bool) -> None:
+        with self._lock:
+            self._chat_configs.setdefault(jid, {})["thinking"] = enabled
             self._save()
 
 
@@ -295,6 +356,21 @@ async def _poll_one(
     if not new_msgs:
         return
 
+    # Transcribe any voice messages before building context
+    for msg in new_msgs:
+        if msg.get("media_type") == "audio" and not msg.get("content"):
+            local_path = await asyncio.to_thread(_download_audio, api_url, msg["id"], jid)
+            if local_path:
+                transcript = await asyncio.to_thread(_transcribe_audio_file, local_path)
+                msg["content"] = f"[vocale: {transcript}]" if transcript else "[vocale: trascrizione non riuscita]"
+            else:
+                msg["content"] = "[vocale: download non riuscito]"
+
+    # Drop messages that are still empty after transcription attempts
+    new_msgs = [m for m in new_msgs if m.get("content", "").strip()]
+    if not new_msgs:
+        return
+
     # Advance the checkpoint immediately
     try:
         latest_ts = datetime.fromisoformat(new_msgs[-1]["timestamp"])
@@ -332,13 +408,22 @@ async def _poll_one(
     )
 
     memory_server = build_memory_server(scope_dir)
+    chat_cfg = config.get_chat_config(jid)
 
     _print_log(
         _c(CYAN, f"[{chat_name}]")
         + f" {len(new_msgs)} new messages, replying..."
+        + (_c(DIM, " [thinking]") if chat_cfg.get("thinking") else "")
     )
 
-    reply = await _call_claude_wa(system_prompt, messages, memory_server, CLAUDE_MODEL)
+    reply = await _call_claude_wa(
+        system_prompt,
+        messages,
+        memory_server,
+        CLAUDE_MODEL,
+        thinking=chat_cfg.get("thinking", False),
+        extra_mcp_servers=config.mcp_servers,
+    )
 
     if not reply:
         _print_log(_c(YELLOW, f"[{chat_name}] Empty response from Claude"))
@@ -528,6 +613,9 @@ def _cmd_status(config: WatchConfig, db_path: str, api_url: str) -> None:
     print(f"  Bridge HTTP: {bridge_status}  ({api_url})")
     print(f"  Model:       {_c(BOLD, CLAUDE_MODEL)}")
     print(f"  Memory:      {NOVA_MEMORY_DIR}")
+    mcp_count = len(config.mcp_servers)
+    mcp_label = f"{mcp_count} server{'s' if mcp_count != 1 else ''}" if mcp_count else _c(DIM, "none")
+    print(f"  MCP config:  {config.mcp_path}  [{mcp_label}]")
     print(f"  Poll:        every {_c(BOLD, str(config.poll_interval))}s")
     print(f"  Chats:       {_c(BOLD, str(len(watched)))} monitored")
     print()
@@ -543,6 +631,89 @@ def _cmd_interval(args: list[str], config: WatchConfig) -> None:
         return
     config.set_interval(val)
     print(_c(GREEN, f"Interval set to {val}s"))
+
+
+def _cmd_config(args: list[str], config: WatchConfig, db_path: str) -> None:
+    """Show or modify per-chat options and global MCP servers.
+
+    Per-chat (thinking):
+      config <chat>                  — show thinking setting for a chat
+      config <chat> thinking on|off  — toggle extended thinking
+
+    Global MCP servers (used by all chats):
+      config mcp list                — list configured MCP servers
+      config mcp add <name> <json>   — add an MCP server
+      config mcp remove <name>       — remove an MCP server
+    """
+    if not args:
+        print(_c(YELLOW, "Usage: config mcp list|add|remove  OR  config <chat> thinking on|off"))
+        return
+
+    # Global MCP commands: config mcp ...
+    if args[0] == "mcp":
+        sub = args[1:]
+        if not sub or sub[0] == "list":
+            servers = config.mcp_servers
+            if not servers:
+                print(_c(DIM, "No extra MCP servers configured."))
+            else:
+                print()
+                for sname, scfg in servers.items():
+                    print(f"  {_c(BOLD, sname)}: {json.dumps(scfg)}")
+                print()
+            return
+        if sub[0] == "add":
+            if len(sub) < 3:
+                print(_c(YELLOW, "Usage: config mcp add <name> <json>"))
+                print(_c(DIM, 'Example: config mcp add home_assistant {"type":"stdio","command":"python","args":["-m","ha_mcp"]}'))
+                return
+            sname = sub[1]
+            try:
+                scfg = json.loads(" ".join(sub[2:]))
+            except json.JSONDecodeError as e:
+                print(_c(RED, f"Invalid JSON: {e}"))
+                return
+            config.add_mcp_server(sname, scfg)
+            print(_c(GREEN, f"Added MCP server '{sname}' (active for all chats)"))
+            return
+        if sub[0] == "remove":
+            if len(sub) < 2:
+                print(_c(YELLOW, "Usage: config mcp remove <name>"))
+                return
+            ok = config.remove_mcp_server(sub[1])
+            if ok:
+                print(_c(GREEN, f"Removed MCP server '{sub[1]}'"))
+            else:
+                print(_c(YELLOW, f"Server '{sub[1]}' not found"))
+            return
+        print(_c(YELLOW, f"Unknown mcp action: {sub[0]}"))
+        return
+
+    # Per-chat commands: config <chat> [thinking on|off]
+    jid = _resolve_jid(args[0], config, db_path)
+    if jid is None:
+        return
+    sub = args[1:]
+    name = next((c["name"] for c in _last_chats if c["jid"] == jid), jid)
+
+    if not sub:
+        cfg = config.get_chat_config(jid)
+        print(f"\n  {_c(BOLD, name)} ({jid})")
+        print(f"  thinking: {_c(GREEN, 'on') if cfg.get('thinking') else _c(DIM, 'off')}")
+        print()
+        return
+
+    if sub[0] == "thinking":
+        if len(sub) < 2 or sub[1] not in ("on", "off"):
+            print(_c(YELLOW, "Usage: config <chat> thinking on|off"))
+            return
+        enabled = sub[1] == "on"
+        config.set_thinking(jid, enabled)
+        state = _c(GREEN, "enabled") if enabled else _c(DIM, "disabled")
+        print(f"Thinking {state} for {name}")
+        return
+
+    print(_c(YELLOW, f"Unknown config option: {sub[0]}"))
 
 
 _DEFAULT_NOTIFY_MSG = "Ciao! Sono Nova, sono in ascolto qui. Scrivimi pure."
@@ -658,8 +829,19 @@ def _cmd_fetch(args: list[str], config: WatchConfig, checkpoints: WhatsappCheckp
 
             system_prompt = build_system_prompt(shared_mem, scope_mem, user_mem, bot_display_name="Nova")
 
-            _print_log(_c(CYAN, f"[{name}] Fetching — generating reply..."))
-            reply = await _call_claude_wa(system_prompt, messages, memory_server, CLAUDE_MODEL)
+            chat_cfg = config.get_chat_config(jid)
+            _print_log(
+                _c(CYAN, f"[{name}] Fetching — generating reply...")
+                + (_c(DIM, " [thinking]") if chat_cfg.get("thinking") else "")
+            )
+            reply = await _call_claude_wa(
+                system_prompt,
+                messages,
+                memory_server,
+                CLAUDE_MODEL,
+                thinking=chat_cfg.get("thinking", False),
+                extra_mcp_servers=config.mcp_servers,
+            )
             if not reply:
                 _print_log(_c(YELLOW, f"[{name}] Empty response from Claude."))
                 continue
@@ -767,6 +949,10 @@ def _cmd_help() -> None:
   {_c(CYAN, "notify [jid|n]")}     Send a "Nova is listening" notice (all chats or one)
   {_c(CYAN, "fetch [jid|n]")}      Read current chat and reply if last message is unanswered
   {_c(CYAN, "context [jid|n]")}    Show the exact prompt Claude would receive for a chat
+  {_c(CYAN, "config <chat> thinking on|off")}  Toggle extended thinking for a chat
+  {_c(CYAN, "config mcp list")}               List global extra MCP servers
+  {_c(CYAN, "config mcp add <name> <json>")}  Add a global MCP server (all chats)
+  {_c(CYAN, "config mcp remove <name>")}      Remove a global MCP server
   {_c(CYAN, "debug <jid>")}        Raw DB inspection for a specific JID
   {_c(CYAN, "help")}               Show this help
   {_c(CYAN, "quit")} / {_c(CYAN, "exit")}        Stop the server
@@ -817,6 +1003,8 @@ async def _command_loop(
             _cmd_fetch(args, config, checkpoints, db_path, api_url)
         elif cmd == "context":
             _cmd_context(args, config, db_path)
+        elif cmd == "config":
+            _cmd_config(args, config, db_path)
         elif cmd == "debug":
             _cmd_debug(args, db_path, checkpoints)
         else:
