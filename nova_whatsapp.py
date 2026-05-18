@@ -23,7 +23,7 @@ import logging
 import os
 import sqlite3
 import tempfile
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
@@ -103,10 +103,38 @@ class WhatsappCheckpoints:
 
 
 # ---------------------------------------------------------------------------
+# SQLite helpers
+# ---------------------------------------------------------------------------
+
+@contextmanager
+def _db_ro(db_path: str):
+    """Context manager for a read-only SQLite connection."""
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=0&cache=private", uri=True)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def _has_lid_column(cursor: sqlite3.Cursor) -> bool:
+    cursor.execute("PRAGMA table_info(chats)")
+    return any(row[1] == "lid" for row in cursor.fetchall())
+
+
+def _name_expr(has_lid: bool) -> str:
+    if has_lid:
+        return (
+            "COALESCE((SELECT name FROM chats WHERE jid = m.chat_jid),"
+            "(SELECT name FROM chats WHERE lid = m.chat_jid), m.chat_jid)"
+        )
+    return "COALESCE((SELECT name FROM chats WHERE jid = m.chat_jid), m.chat_jid)"
+
+
+# ---------------------------------------------------------------------------
 # SQLite access (run in a thread to avoid blocking the event loop)
 # ---------------------------------------------------------------------------
 
-def _resolve_jid_variants(db_path: str, jid: str, contact_map: dict | None = None) -> list[str]:
+def resolve_jid_variants(db_path: str, jid: str, contact_map: dict | None = None) -> list[str]:
     """Return all JIDs (phone + LID) linked to the same contact.
 
     Sources (merged, deduped):
@@ -135,66 +163,54 @@ def _resolve_jid_variants(db_path: str, jid: str, contact_map: dict | None = Non
 
     # 2. Bridge DB chats.lid column
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=0&cache=private", uri=True)
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA table_info(chats)")
-        columns = {row[1] for row in cursor.fetchall()}
-        if "lid" in columns:
-            placeholders = ",".join("?" * len(jids))
-            cursor.execute(
-                f"SELECT jid, lid FROM chats WHERE jid IN ({placeholders}) OR lid IN ({placeholders})",
-                jids + jids,
-            )
-            for row in cursor.fetchall():
-                for val in row:
-                    if val and val not in jids:
-                        jids.append(val)
+        with _db_ro(db_path) as conn:
+            cursor = conn.cursor()
+            if _has_lid_column(cursor):
+                placeholders = ",".join("?" * len(jids))
+                cursor.execute(
+                    f"SELECT jid, lid FROM chats WHERE jid IN ({placeholders}) OR lid IN ({placeholders})",
+                    jids + jids,
+                )
+                for row in cursor.fetchall():
+                    for val in row:
+                        if val and val not in jids:
+                            jids.append(val)
     except sqlite3.Error:
         pass
-    finally:
-        if "conn" in locals():
-            conn.close()  # type: ignore[possibly-undefined]
 
     return jids
 
 
-def _fetch_new_messages(db_path: str, chat_jid: str, after: datetime | None, limit: int, contact_map: dict | None = None) -> list[dict]:
+def fetch_new_messages(db_path: str, chat_jid: str, after: datetime | None, limit: int, contact_map: dict | None = None) -> list[dict]:
     """New messages in a chat, from oldest to newest, excluding messages we sent."""
     try:
-        jids = _resolve_jid_variants(db_path, chat_jid, contact_map)
+        jids = resolve_jid_variants(db_path, chat_jid, contact_map)
         placeholders = ",".join("?" * len(jids))
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=0&cache=private", uri=True)
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA table_info(chats)")
-        has_lid = any(row[1] == "lid" for row in cursor.fetchall())
-        name_expr = (
-            "COALESCE((SELECT name FROM chats WHERE jid = m.chat_jid),"
-            "(SELECT name FROM chats WHERE lid = m.chat_jid), m.chat_jid)"
-            if has_lid else
-            "COALESCE((SELECT name FROM chats WHERE jid = m.chat_jid), m.chat_jid)"
-        )
-        params: list = list(jids)
-        after_clause = ""
-        if after is not None:
-            after_clause = "AND CAST(strftime('%s', m.timestamp) AS INTEGER) > ?"
-            params.append(int(after.timestamp()))
-        cursor.execute(
-            f"""
-            SELECT m.id, m.timestamp, m.sender, m.content, m.is_from_me, {name_expr} as chat_name,
-                   COALESCE(m.media_type, '') as media_type
-            FROM messages m
-            WHERE m.chat_jid IN ({placeholders}) {after_clause}
-              AND m.is_from_me = 0
-              AND (
-                  (m.content IS NOT NULL AND m.content != '')
-                  OR COALESCE(m.media_type, '') = 'audio'
-              )
-            ORDER BY m.timestamp ASC
-            LIMIT ?
-            """,
-            params + [limit],
-        )
-        rows = cursor.fetchall()
+        with _db_ro(db_path) as conn:
+            cursor = conn.cursor()
+            expr = _name_expr(_has_lid_column(cursor))
+            params: list = list(jids)
+            after_clause = ""
+            if after is not None:
+                after_clause = "AND CAST(strftime('%s', m.timestamp) AS INTEGER) > ?"
+                params.append(int(after.timestamp()))
+            cursor.execute(
+                f"""
+                SELECT m.id, m.timestamp, m.sender, m.content, m.is_from_me, {expr} as chat_name,
+                       COALESCE(m.media_type, '') as media_type
+                FROM messages m
+                WHERE m.chat_jid IN ({placeholders}) {after_clause}
+                  AND m.is_from_me = 0
+                  AND (
+                      (m.content IS NOT NULL AND m.content != '')
+                      OR COALESCE(m.media_type, '') = 'audio'
+                  )
+                ORDER BY m.timestamp ASC
+                LIMIT ?
+                """,
+                params + [limit],
+            )
+            rows = cursor.fetchall()
         return [
             {
                 "id": r[0],
@@ -210,39 +226,29 @@ def _fetch_new_messages(db_path: str, chat_jid: str, after: datetime | None, lim
     except sqlite3.Error as e:
         logger.error("DB error fetching new messages (%s): %s", chat_jid, e)
         return []
-    finally:
-        if "conn" in locals():
-            conn.close()  # type: ignore[possibly-undefined]
 
 
-def _fetch_history(db_path: str, chat_jid: str, before_iso: str, limit: int, contact_map: dict | None = None) -> list[dict]:
+def fetch_history(db_path: str, chat_jid: str, before_iso: str, limit: int, contact_map: dict | None = None) -> list[dict]:
     """Earlier messages to build the historical context (both directions)."""
     try:
-        jids = _resolve_jid_variants(db_path, chat_jid, contact_map)
+        jids = resolve_jid_variants(db_path, chat_jid, contact_map)
         placeholders = ",".join("?" * len(jids))
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=0&cache=private", uri=True)
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA table_info(chats)")
-        has_lid = any(row[1] == "lid" for row in cursor.fetchall())
-        name_expr = (
-            "COALESCE((SELECT name FROM chats WHERE jid = m.chat_jid),"
-            "(SELECT name FROM chats WHERE lid = m.chat_jid), m.chat_jid)"
-            if has_lid else
-            "COALESCE((SELECT name FROM chats WHERE jid = m.chat_jid), m.chat_jid)"
-        )
-        cursor.execute(
-            f"""
-            SELECT m.id, m.timestamp, m.sender, m.content, m.is_from_me, {name_expr} as chat_name
-            FROM messages m
-            WHERE m.chat_jid IN ({placeholders})
-              AND CAST(strftime('%s', m.timestamp) AS INTEGER) < CAST(strftime('%s', ?) AS INTEGER)
-              AND m.content IS NOT NULL AND m.content != ''
-            ORDER BY m.timestamp DESC
-            LIMIT ?
-            """,
-            list(jids) + [before_iso, limit],
-        )
-        rows = cursor.fetchall()
+        with _db_ro(db_path) as conn:
+            cursor = conn.cursor()
+            expr = _name_expr(_has_lid_column(cursor))
+            cursor.execute(
+                f"""
+                SELECT m.id, m.timestamp, m.sender, m.content, m.is_from_me, {expr} as chat_name
+                FROM messages m
+                WHERE m.chat_jid IN ({placeholders})
+                  AND CAST(strftime('%s', m.timestamp) AS INTEGER) < CAST(strftime('%s', ?) AS INTEGER)
+                  AND m.content IS NOT NULL AND m.content != ''
+                ORDER BY m.timestamp DESC
+                LIMIT ?
+                """,
+                list(jids) + [before_iso, limit],
+            )
+            rows = cursor.fetchall()
         rows.reverse()  # reorder chronologically
         return [
             {
@@ -258,38 +264,28 @@ def _fetch_history(db_path: str, chat_jid: str, before_iso: str, limit: int, con
     except sqlite3.Error as e:
         logger.error("DB error fetching history (%s): %s", chat_jid, e)
         return []
-    finally:
-        if "conn" in locals():
-            conn.close()  # type: ignore[possibly-undefined]
 
 
-def _fetch_tail(db_path: str, chat_jid: str, limit: int = 40, contact_map: dict | None = None) -> list[dict]:
+def fetch_tail(db_path: str, chat_jid: str, limit: int = 40, contact_map: dict | None = None) -> list[dict]:
     """Return the last `limit` messages (all senders) chronologically."""
     try:
-        jids = _resolve_jid_variants(db_path, chat_jid, contact_map)
+        jids = resolve_jid_variants(db_path, chat_jid, contact_map)
         placeholders = ",".join("?" * len(jids))
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=0&cache=private", uri=True)
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA table_info(chats)")
-        has_lid = any(row[1] == "lid" for row in cursor.fetchall())
-        name_expr = (
-            "COALESCE((SELECT name FROM chats WHERE jid = m.chat_jid),"
-            "(SELECT name FROM chats WHERE lid = m.chat_jid), m.chat_jid)"
-            if has_lid else
-            "COALESCE((SELECT name FROM chats WHERE jid = m.chat_jid), m.chat_jid)"
-        )
-        cursor.execute(
-            f"""
-            SELECT m.id, m.timestamp, m.sender, m.content, m.is_from_me, {name_expr} as chat_name
-            FROM messages m
-            WHERE m.chat_jid IN ({placeholders})
-              AND m.content IS NOT NULL AND m.content != ''
-            ORDER BY m.timestamp DESC
-            LIMIT ?
-            """,
-            list(jids) + [limit],
-        )
-        rows = cursor.fetchall()
+        with _db_ro(db_path) as conn:
+            cursor = conn.cursor()
+            expr = _name_expr(_has_lid_column(cursor))
+            cursor.execute(
+                f"""
+                SELECT m.id, m.timestamp, m.sender, m.content, m.is_from_me, {expr} as chat_name
+                FROM messages m
+                WHERE m.chat_jid IN ({placeholders})
+                  AND m.content IS NOT NULL AND m.content != ''
+                ORDER BY m.timestamp DESC
+                LIMIT ?
+                """,
+                list(jids) + [limit],
+            )
+            rows = cursor.fetchall()
         rows.reverse()
         return [
             {
@@ -305,16 +301,13 @@ def _fetch_tail(db_path: str, chat_jid: str, limit: int = 40, contact_map: dict 
     except sqlite3.Error as e:
         logger.error("DB error fetching tail (%s): %s", chat_jid, e)
         return []
-    finally:
-        if "conn" in locals():
-            conn.close()  # type: ignore[possibly-undefined]
 
 
 # ---------------------------------------------------------------------------
 # Send message via Go bridge
 # ---------------------------------------------------------------------------
 
-def _send_via_bridge(api_url: str, recipient_jid: str, text: str) -> bool:
+def send_via_bridge(api_url: str, recipient_jid: str, text: str) -> bool:
     try:
         resp = requests.post(
             f"{api_url}/send",
@@ -334,7 +327,7 @@ def _send_via_bridge(api_url: str, recipient_jid: str, text: str) -> bool:
 # Audio download + transcription
 # ---------------------------------------------------------------------------
 
-def _download_audio(api_url: str, msg_id: str, chat_jid: str) -> str | None:
+def download_audio(api_url: str, msg_id: str, chat_jid: str) -> str | None:
     """Download an audio message via the bridge and return the local file path."""
     try:
         resp = requests.post(
@@ -353,7 +346,7 @@ def _download_audio(api_url: str, msg_id: str, chat_jid: str) -> str | None:
         return None
 
 
-def _transcribe_audio_file(file_path: str) -> str | None:
+def transcribe_audio_file(file_path: str) -> str | None:
     """Transcribe an audio file via Groq or OpenAI Whisper API."""
     provider = os.getenv("WHISPER_PROVIDER", "groq").lower()
     if provider == "groq":
@@ -399,7 +392,7 @@ def _transcribe_audio_file(file_path: str) -> str | None:
 # Build messages for Claude
 # ---------------------------------------------------------------------------
 
-def _build_messages_for_claude(history: list[dict], new_msgs: list[dict]) -> list[dict]:
+def build_messages_for_claude(history: list[dict], new_msgs: list[dict]) -> list[dict]:
     """
     Convert DB rows to the user/assistant format of the Messages API.
     is_from_me=True -> assistant, otherwise -> user with a sender prefix.
@@ -427,7 +420,7 @@ def _build_messages_for_claude(history: list[dict], new_msgs: list[dict]) -> lis
     return msgs
 
 
-def _serialize_history_wa(messages: list[dict]) -> str:
+def serialize_history_wa(messages: list[dict]) -> str:
     """Same pattern as nova_bot._serialize_history but for the WA context."""
     if not messages:
         return ""
@@ -449,7 +442,7 @@ def _serialize_history_wa(messages: list[dict]) -> str:
 # Claude call (WhatsApp version — no Discord read server)
 # ---------------------------------------------------------------------------
 
-async def _call_claude_wa(
+async def call_claude_wa(
     system: str,
     messages: list[dict],
     memory_server,
@@ -458,7 +451,7 @@ async def _call_claude_wa(
     thinking: bool = False,
     extra_mcp_servers: dict | None = None,
 ) -> str:
-    prompt = _serialize_history_wa(messages)
+    prompt = serialize_history_wa(messages)
 
     mcp_servers: dict = {"nova_memory": memory_server}
     if extra_mcp_servers:
@@ -527,7 +520,7 @@ async def _process_chat(
         return
 
     new_msgs: list[dict] = await asyncio.to_thread(
-        _fetch_new_messages, db_path, jid, last_seen, 50
+        fetch_new_messages, db_path, jid, last_seen, 50
     )
 
     if not new_msgs:
@@ -553,10 +546,10 @@ async def _process_chat(
 
     # Fetch earlier history for context
     history: list[dict] = await asyncio.to_thread(
-        _fetch_history, db_path, jid, new_msgs[0]["timestamp"], history_limit
+        fetch_history, db_path, jid, new_msgs[0]["timestamp"], history_limit
     )
 
-    messages = _build_messages_for_claude(history, new_msgs)
+    messages = build_messages_for_claude(history, new_msgs)
     chat_name = new_msgs[0].get("chat_name") or jid
 
     system_prompt = build_system_prompt(
@@ -578,7 +571,7 @@ async def _process_chat(
     )
 
     try:
-        reply = await _call_claude_wa(system_prompt, messages, memory_server, model)
+        reply = await call_claude_wa(system_prompt, messages, memory_server, model)
     except Exception:
         logger.exception("Error calling Claude for WA chat %s", jid)
         return
@@ -587,7 +580,7 @@ async def _process_chat(
         logger.warning("Claude returned an empty response for %s", jid)
         return
 
-    ok = await asyncio.to_thread(_send_via_bridge, api_url, jid, reply)
+    ok = await asyncio.to_thread(send_via_bridge, api_url, jid, reply)
     if ok:
         logger.info("WA reply sent to %s (%d characters)", chat_name, len(reply))
     else:
