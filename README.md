@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/images/nova_avatar.png" width="100" style="border-radius: 50%;" />
+<img src="assets/images/nova_avatar_circle.png" width="100" />
 
 # Nova
 
