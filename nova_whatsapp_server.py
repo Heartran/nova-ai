@@ -311,6 +311,11 @@ async def _poll_loop(
 
     poll_count = 0
     while not stop_event.is_set():
+        # Clear before polling so any WAL change that arrives during the poll
+        # is captured and shortens the subsequent sleep rather than being lost.
+        if wakeup_event is not None:
+            wakeup_event.clear()
+
         jids = config.watched_jids
         if jids and db_path and Path(db_path).is_file():
             poll_count += 1
@@ -330,7 +335,6 @@ async def _poll_loop(
 
         interval = config.poll_interval
         if wakeup_event is not None:
-            wakeup_event.clear()
             try:
                 await asyncio.wait_for(wakeup_event.wait(), timeout=interval)
             except asyncio.TimeoutError:
