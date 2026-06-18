@@ -454,6 +454,35 @@ def voice_deps_available() -> tuple[bool, str]:
     return True, ""
 
 
+def ensure_opus_loaded() -> bool:
+    """Make sure libopus is loaded so Discord can (de)code voice.
+
+    On Linux discord.py often can't auto-load opus when only the runtime
+    `libopus.so.0` is present (no `-dev` symlink), so `find_library('opus')`
+    returns None and voice send/receive silently fails. Try a few common
+    library names before giving up.
+    """
+    import ctypes.util
+
+    import discord
+
+    if discord.opus.is_loaded():
+        return True
+    candidates = []
+    found = ctypes.util.find_library("opus")
+    if found:
+        candidates.append(found)
+    candidates += ["libopus.so.0", "libopus.so", "opus", "libopus-0.dll"]
+    for name in candidates:
+        try:
+            discord.opus.load_opus(name)
+            if discord.opus.is_loaded():
+                return True
+        except Exception:
+            continue
+    return False
+
+
 # =============================================================================
 # Discord-bound pieces (lazy: built only when actually joining a channel)
 # =============================================================================
@@ -533,6 +562,11 @@ class VoiceSession:
         from discord.ext import voice_recv
 
         self._loop = asyncio.get_running_loop()
+        if not ensure_opus_loaded():
+            logger.warning(
+                "voice: libopus non caricato; ricezione/invio voce potrebbero non "
+                "funzionare (su Linux: apt install libopus0)"
+            )
         self._vc = await self.channel.connect(cls=voice_recv.VoiceRecvClient)
         self._vc.listen(_build_sink(self._on_packet))
         self._running = True
