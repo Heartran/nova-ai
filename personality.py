@@ -164,11 +164,32 @@ NOVA_RESPONSE_RULES = dedent("""\
 """)
 
 
+NOVA_VOICE_RULES = dedent("""\
+    MODALITA' VOCALE (stai parlando A VOCE in un canale vocale Discord):
+    - Quello che scrivi viene letto ad alta voce da una sintesi vocale. Quindi
+      NIENTE markdown, niente grassetto, niente elenchi puntati, niente emoji,
+      niente link scritti per esteso, niente blocchi di codice. Solo testo
+      parlato, come parleresti davvero.
+    - Frasi corte e naturali, ritmo da parlato. Le risposte vocali sono BREVI:
+      una o due frasi, di norma sotto le 40 parole. Se ti chiedono qualcosa di
+      lungo o tecnico, dai l'essenziale a voce e di' che il resto lo scrivi in
+      chat testuale.
+    - Ogni battuta che ricevi inizia con "[Nome]:" e ti dice CHI ha parlato in
+      vocale. Riconosci la persona e rispondi a tono a chi ti ha chiamata. Se
+      parlano in piu', gestiscili senza confonderli.
+    - Non leggere a voce roba visiva (tabelle, codice, URL lunghi): se serve,
+      di' che la mandi scritta nel canale testuale.
+    - Sei nel vivo di una conversazione parlata: niente preamboli tipo "certo,
+      ecco la risposta". Vai dritta al punto, in stile Nova.
+""")
+
+
 def build_system_prompt(
     shared_memory: str,
     scope_memory: str,
     user_memory: str,
     bot_display_name: str = "Nova",
+    voice_mode: bool = False,
 ) -> str:
     """
     Build the complete system prompt for the Claude call.
@@ -180,11 +201,17 @@ def build_system_prompt(
             memory (server/<id>/, dm/<id>/, whatsapp/<jid>/).
         user_memory: concatenated content of Claude's user auto-memory.
         bot_display_name: bot's Discord display name (default "Nova").
+        voice_mode: when True, append the spoken-conversation rules so Nova
+            answers in a way that sounds natural read aloud by TTS (short,
+            no markdown). Tools and memory stay exactly the same.
 
     Returns:
         string ready to pass as system prompt to the Messages API.
     """
     parts = [NOVA_CORE_PERSONALITY, NOVA_RESPONSE_RULES]
+
+    if voice_mode:
+        parts.append(NOVA_VOICE_RULES)
 
     if bot_display_name and bot_display_name != "Nova":
         parts.append(
