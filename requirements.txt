@@ -6,5 +6,7 @@ requests>=2.31.0
 # PyNaCl: cifratura voce Discord. discord-ext-voice-recv: ricezione audio
 # per-utente (Discord nativo sa solo inviare, non ricevere).
 # Richiede anche libopus a livello di sistema (su Linux: apt install libopus0).
+# NB: discord-ext-voice-recv pubblica su PyPI solo pre-release (alpha), quindi
+# il vincolo deve referenziare una alpha o pip la ignorerebbe (niente >=0.5.0).
 PyNaCl>=1.5.0
-discord-ext-voice-recv>=0.5.0
+discord-ext-voice-recv>=0.5.0a167
