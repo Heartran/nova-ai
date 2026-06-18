@@ -9,7 +9,8 @@ Triggers on a message when:
 
 Required setup:
   - Filled-in .env file (copy from .env.example)
-  - On the Discord Developer Portal: Privileged Gateway Intents -> MESSAGE CONTENT INTENT enabled
+  - On the Discord Developer Portal: Privileged Gateway Intents ->
+    MESSAGE CONTENT + PRESENCE + SERVER MEMBERS INTENT enabled
   - Bot invited with 'Send Messages' + 'Read Message History' + 'View Channel' permissions
 """
 
@@ -140,7 +141,8 @@ intents = discord.Intents.default()
 intents.message_content = True   # requires MESSAGE CONTENT INTENT enabled on the portal
 intents.messages = True
 intents.guilds = True
-# DMs work with default intents; no extra privileged intents needed.
+intents.presences = True         # requires PRESENCE INTENT enabled on the portal
+intents.members = True           # requires SERVER MEMBERS INTENT enabled on the portal
 
 client = discord.Client(intents=intents)
 tree = discord.app_commands.CommandTree(client)

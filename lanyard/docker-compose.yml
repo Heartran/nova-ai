@@ -1,0 +1,35 @@
+# Self-hosted Lanyard, agganciato al bot Nova.
+# Espone la presence Discord via API REST locale: GET http://localhost:4001/v1/users/<user_id>
+#
+# Il BOT_TOKEN viene letto da ./.env (NON committato, gia' coperto da .gitignore).
+# Quel token e' lo stesso del bot Nova: il bot deve condividere un server con te
+# e avere PRESENCE INTENT + SERVER MEMBERS INTENT attivi (gia' fatto).
+#
+# Avvio:   docker compose up -d
+# Stato:   docker compose ps
+# Log:     docker compose logs -f lanyard
+# Stop:    docker compose down
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: nova_lanyard_redis
+    restart: unless-stopped
+    volumes:
+      - lanyard_redis_data:/data
+
+  lanyard:
+    image: phineas/lanyard:latest
+    container_name: nova_lanyard
+    restart: unless-stopped
+    depends_on:
+      - redis
+    ports:
+      - "4001:4001"
+    env_file:
+      - .env          # fornisce BOT_TOKEN
+    environment:
+      REDIS_HOST: redis
+
+volumes:
+  lanyard_redis_data:
