@@ -1,0 +1,17 @@
+# Optional extras for the FREE local voice-clone TTS fallback (XTTS-v2).
+# This makes Nova keep *her* voice even without ElevenLabs credits, by cloning
+# the bundled reference clip (assets/voice/nova_reference.wav).
+#
+# Heavy: pulls in PyTorch and downloads a ~1.8 GB model on first use, and needs
+# ffmpeg/libopus at the system level (see README). Install only if you want the
+# clone fallback:
+#
+#   # (recommended) CPU-only torch first, much smaller than the CUDA build:
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements-clone.txt
+#
+coqui-tts>=0.27.0
+# XTTS code imports a symbol removed in transformers 5.x, so cap below 5.
+transformers>=4.57,<5
+# torch >=2.9 needs torchcodec for audio IO (uses the system ffmpeg libs).
+torchcodec

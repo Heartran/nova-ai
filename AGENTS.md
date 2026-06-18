@@ -12,7 +12,7 @@ Template developed by [Heartran](https://github.com/heartran)
 
 - `nova_mcp.py`: MCP (Model Context Protocol) integration to extend the bot's capabilities.
 
-- `nova_voice.py`: Voice-channel support — join a voice channel, transcribe per-speaker audio (STT), run the same Claude pipeline (personality + memory + tools), and reply with ElevenLabs streaming TTS. Heavy deps (`discord-ext-voice-recv`, `PyNaCl`) are imported lazily so the rest of the bot runs without them; managed via the `/voce` slash commands.
+- `nova_voice.py`: Voice-channel support — join a voice channel, transcribe per-speaker audio (STT), run the same Claude pipeline (personality + memory + tools), and reply with ElevenLabs streaming TTS. Heavy deps (`discord-ext-voice-recv`, `PyNaCl`) are imported lazily so the rest of the bot runs without them; managed via the `/join`, `/leave` and `/voicestatus` slash commands.
 
 - `nova_read.py`: Read/parse logic for memory and context files.
 
