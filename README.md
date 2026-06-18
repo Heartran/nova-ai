@@ -106,9 +106,9 @@ Per ogni battuta:
 
 ### Comandi
 
-- `/voce entra` — Nova entra nel canale vocale **in cui sei tu**
-- `/voce esci` — Nova esce
-- `/voce stato` — dove si trova Nova
+- `/join` — Nova entra nel canale vocale **in cui sei tu**
+- `/leave` — Nova esce
+- `/voicestatus` — dove si trova Nova
 
 Quando resta sola nel canale, esce da sola.
 
@@ -126,7 +126,7 @@ Quando resta sola nel canale, esce da sola.
    - `ELEVENLABS_API_KEY` + `ELEVENLABS_VOICE_ID` per la voce di Nova
    - `GROQ_API_KEY` (o `VOICE_STT_PROVIDER=elevenlabs`) per farla ascoltare
 
-Se mancano le dipendenze o le chiavi, `/voce entra` te lo dice senza far
+Se mancano le dipendenze o le chiavi, `/join` te lo dice senza far
 crashare il resto del bot.
 
 ### Voce clonata gratis (fallback senza crediti)

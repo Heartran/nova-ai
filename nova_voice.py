@@ -34,7 +34,7 @@ The heavy/optional imports (`discord`, `discord.ext.voice_recv`) are performed
 LAZILY inside functions, so importing this module only needs the stdlib +
 `requests`. That keeps the pure audio/endpointing logic unit-testable without
 Discord installed, and lets the rest of the bot run even if the voice extras
-are missing — `/voce entra` then replies with a clear setup hint.
+are missing — `/join` then replies with a clear setup hint.
 """
 
 from __future__ import annotations
@@ -982,14 +982,13 @@ class VoiceManager:
 
 
 def register_voice_commands(tree, manager: VoiceManager) -> None:
-    """Register the /voce slash command group. discord is imported lazily."""
+    """Register the top-level voice slash commands (/join, /leave, /voicestatus).
+    discord is imported lazily so this module stays importable without it."""
     import discord
     from discord import app_commands
 
-    voce = app_commands.Group(name="voce", description="Gestione del canale vocale di Nova")
-
-    @voce.command(name="entra", description="Fai entrare Nova nel tuo canale vocale")
-    async def voce_entra(interaction: "discord.Interaction"):
+    @tree.command(name="join", description="Fai entrare Nova nel tuo canale vocale")
+    async def join(interaction: "discord.Interaction"):
         if interaction.guild is None:
             await interaction.response.send_message("Solo nei server.", ephemeral=True)
             return
@@ -1004,21 +1003,19 @@ def register_voice_commands(tree, manager: VoiceManager) -> None:
         ok, msg = await manager.join(interaction.guild, voice_state.channel)
         await interaction.followup.send(msg, ephemeral=True)
 
-    @voce.command(name="esci", description="Fai uscire Nova dal canale vocale")
-    async def voce_esci(interaction: "discord.Interaction"):
+    @tree.command(name="leave", description="Fai uscire Nova dal canale vocale")
+    async def leave(interaction: "discord.Interaction"):
         if interaction.guild is None:
             await interaction.response.send_message("Solo nei server.", ephemeral=True)
             return
         _, msg = await manager.leave(interaction.guild.id)
         await interaction.response.send_message(msg, ephemeral=True)
 
-    @voce.command(name="stato", description="Mostra se Nova e' in un canale vocale")
-    async def voce_stato(interaction: "discord.Interaction"):
+    @tree.command(name="voicestatus", description="Mostra se Nova e' in un canale vocale")
+    async def voicestatus(interaction: "discord.Interaction"):
         if interaction.guild is None:
             await interaction.response.send_message("Solo nei server.", ephemeral=True)
             return
         await interaction.response.send_message(
             manager.status_text(interaction.guild.id), ephemeral=True
         )
-
-    tree.add_command(voce)
