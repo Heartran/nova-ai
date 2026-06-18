@@ -84,6 +84,49 @@ Vedrai sul terminale qualcosa come:
 12:34:56 [INFO] nova: In 1 server
 ```
 
+## Voce (canali vocali)
+
+Nova puo' entrare in un canale vocale e **parlare** con voi. Non e' un modello
+realtime "scatola nera": e' la stessa Nova del testo (stessa personalita',
+stessa memoria, **stessi tool**), solo con orecchie e bocca.
+
+Per ogni battuta:
+
+1. riceve l'audio per-utente dal canale (sa **chi** parla: ogni pacchetto
+   audio Discord e' attribuito a un membro)
+2. aspetta che finisci di parlare (silenzio) e trascrive con Whisper/ElevenLabs
+   Scribe -> `[Nome]: testo`
+3. chiama Claude con lo stesso pipeline del testo (personalita' + memoria +
+   tool: memoria, lettura canali, web)
+4. sintetizza la risposta con **ElevenLabs** in streaming e la riproduce nel
+   canale, a bassa latenza
+5. se la interrompi mentre parla, smette e ti ascolta (barge-in)
+
+### Comandi
+
+- `/voce entra` — Nova entra nel canale vocale **in cui sei tu**
+- `/voce esci` — Nova esce
+- `/voce stato` — dove si trova Nova
+
+Quando resta sola nel canale, esce da sola.
+
+### Setup voce
+
+1. Dipendenze extra: `pip install -r requirements.txt` installa `PyNaCl` e
+   `discord-ext-voice-recv`. Su Linux serve anche **libopus** per decodificare
+   l'audio in arrivo: `sudo apt install libopus0`. Con
+   `ELEVENLABS_OUTPUT_FORMAT=pcm_48000` (default) **non** serve ffmpeg; con
+   altri formati (mp3, ecc.) sì.
+2. Permessi del bot nel canale vocale: **Connect** e **Speak**.
+3. Nel Developer Portal non serve un nuovo intent privilegiato: `voice_states`
+   e' abilitato dal codice e non e' privilegiato.
+4. Nel `.env` (vedi sezione *Voce* in `.env.example`):
+   - `ELEVENLABS_API_KEY` + `ELEVENLABS_VOICE_ID` per la voce di Nova
+   - `GROQ_API_KEY` (o `VOICE_STT_PROVIDER=elevenlabs`) per farla ascoltare
+
+Se mancano le dipendenze o le chiavi, `/voce entra` te lo dice senza far
+crashare il resto del bot.
+
 ## Memoria
 
 Due fonti di memoria, entrambe configurate via `.env`:
@@ -113,6 +156,7 @@ Read-only: il bot la legge per avere contesto su Fede, ma non ci scrive mai.
 ```
 nova-discord-bot/
 +-- nova_bot.py        # main: discord.py + trigger logic + invio
++-- nova_voice.py      # voce: join canale vocale, STT -> Claude -> TTS ElevenLabs
 +-- personality.py     # system prompt che incarna Nova
 +-- memory.py          # caricamento dei .md, scrittura su conversations.md
 +-- requirements.txt
