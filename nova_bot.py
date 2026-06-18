@@ -46,6 +46,7 @@ from memory import (
 )
 from nova_mcp import build_memory_server
 from nova_read import audit_web, build_read_server
+from nova_voice import VoiceConfig, VoiceManager, register_voice_commands
 from personality import build_system_prompt
 from slash_commands import register_slash_commands
 
@@ -140,11 +141,50 @@ intents = discord.Intents.default()
 intents.message_content = True   # requires MESSAGE CONTENT INTENT enabled on the portal
 intents.messages = True
 intents.guilds = True
+intents.voice_states = True       # needed to join/track voice channels (not privileged)
 # DMs work with default intents; no extra privileged intents needed.
 
 client = discord.Client(intents=intents)
 tree = discord.app_commands.CommandTree(client)
 register_slash_commands(tree, NOVA_MEMORY_DIR, scope_dir_for, ensure_scope_skeleton)
+
+
+# -----------------------------------------------------------------------------
+# Voice channel support — speech in / speech out, SAME brain as text Nova
+# -----------------------------------------------------------------------------
+VOICE_CONFIG = VoiceConfig.from_env()
+
+
+async def voice_brain(messages: list[dict], guild, scope_dir: Path, requester: str) -> str:
+    """Run the SAME Claude pipeline used for text, for a single voice turn.
+
+    `messages` is the running voice conversation; user turns are already tagged
+    with "[Nome]: ..." so Nova knows who is speaking. Personality, memory and
+    ALL her tools (memory write, server read, web) are identical to the text
+    flow — only the system prompt gets the spoken-style addendum (voice_mode).
+    """
+    shared_mem = load_shared_memory(NOVA_MEMORY_DIR)
+    scope_mem = load_scope_memory(scope_dir)
+    user_mem = load_user_memory(USER_MEMORY_DIR) if USER_MEMORY_DIR.exists() else ""
+    bot_name = client.user.display_name if client.user else "Nova"
+    system_prompt = build_system_prompt(
+        shared_mem, scope_mem, user_mem, bot_display_name=bot_name, voice_mode=True
+    )
+    memory_server = build_memory_server(scope_dir)
+    read_server = build_read_server(client, guild, scope_dir, requester)
+    audit_cb = _build_can_use_tool(scope_dir, requester)
+    return await call_claude(system_prompt, messages, memory_server, read_server, audit_cb)
+
+
+voice_manager = VoiceManager(
+    client,
+    VOICE_CONFIG,
+    voice_brain,
+    NOVA_MEMORY_DIR,
+    scope_dir_for,
+    ensure_scope_skeleton,
+)
+register_voice_commands(tree, voice_manager)
 
 # Per-channel cooldown: {channel_id: last_timestamp}
 _last_response_at: dict[int, float] = {}
@@ -452,6 +492,20 @@ async def handle_message(message: discord.Message) -> None:
             )
         except discord.HTTPException:
             pass
+
+
+@client.event
+async def on_voice_state_update(member, before, after):
+    """Auto-leave when Nova is the only one left in her voice channel."""
+    if client.user is None or member.guild is None:
+        return
+    session = voice_manager.session_for(member.guild.id)
+    if session is None:
+        return
+    humans = [m for m in getattr(session.channel, "members", []) if not m.bot]
+    if not humans:
+        logger.info("voice: alone in #%s, leaving", getattr(session.channel, "name", "?"))
+        await voice_manager.leave(member.guild.id)
 
 
 @client.event
