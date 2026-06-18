@@ -149,7 +149,8 @@ class TestVoiceConfig(unittest.TestCase):
             "ELEVENLABS_OUTPUT_FORMAT", "VOICE_LANGUAGE", "VOICE_STT_PROVIDER",
             "WHISPER_PROVIDER", "GROQ_API_KEY", "OPENAI_API_KEY",
             "VOICE_SILENCE_MS", "VOICE_MIN_UTTERANCE_MS", "VOICE_ENERGY_THRESHOLD",
-            "VOICE_HISTORY_TURNS",
+            "VOICE_HISTORY_TURNS", "TTS_PROVIDER", "TTS_FALLBACK",
+            "CLONE_REFERENCE_WAV", "CLONE_MODEL", "CLONE_LANGUAGE",
         ]
         self._saved = {k: os.environ.get(k) for k in self._keys}
         for k in self._keys:
@@ -163,19 +164,24 @@ class TestVoiceConfig(unittest.TestCase):
                 os.environ[k] = v
 
     def test_defaults(self):
+        # Point the clone reference at a missing file so we test the
+        # "nothing configured" path deterministically (independent of the
+        # bundled asset).
+        os.environ["CLONE_REFERENCE_WAV"] = "/no/such/clone_ref.wav"
         cfg = nv.VoiceConfig.from_env()
         self.assertEqual(cfg.model_id, "eleven_flash_v2_5")
         self.assertEqual(cfg.output_format, "pcm_48000")
         self.assertEqual(cfg.language, "it")
         self.assertEqual(cfg.silence_ms, 900)
-        self.assertFalse(cfg.tts_ready())  # no key/voice
-        self.assertFalse(cfg.stt_ready())  # no groq key
+        self.assertFalse(cfg.eleven_ready())  # no key/voice
+        self.assertFalse(cfg.tts_ready())     # and clone ref missing
+        self.assertFalse(cfg.stt_ready())     # no groq key
 
-    def test_tts_ready_requires_key_and_voice(self):
+    def test_eleven_ready_requires_key_and_voice(self):
         os.environ["ELEVENLABS_API_KEY"] = "k"
-        self.assertFalse(nv.VoiceConfig.from_env().tts_ready())
+        self.assertFalse(nv.VoiceConfig.from_env().eleven_ready())
         os.environ["ELEVENLABS_VOICE_ID"] = "v"
-        self.assertTrue(nv.VoiceConfig.from_env().tts_ready())
+        self.assertTrue(nv.VoiceConfig.from_env().eleven_ready())
 
     def test_stt_ready_per_provider(self):
         os.environ["GROQ_API_KEY"] = "g"
@@ -194,6 +200,57 @@ class TestVoiceConfig(unittest.TestCase):
     def test_bad_int_falls_back_to_default(self):
         os.environ["VOICE_SILENCE_MS"] = "not-a-number"
         self.assertEqual(nv.VoiceConfig.from_env().silence_ms, 900)
+
+    def test_default_provider_chain(self):
+        cfg = nv.VoiceConfig.from_env()
+        self.assertEqual(cfg.tts_provider, "elevenlabs")
+        self.assertEqual(cfg.tts_fallback, "clone")
+        self.assertEqual(cfg.tts_order(), ["elevenlabs", "clone"])
+
+    def test_provider_chain_dedup_and_custom(self):
+        os.environ["TTS_PROVIDER"] = "clone"
+        os.environ["TTS_FALLBACK"] = "clone"
+        self.assertEqual(nv.VoiceConfig.from_env().tts_order(), ["clone"])
+
+
+class TestTtsReadiness(unittest.TestCase):
+    def test_clone_ready_checks_reference_file(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".wav") as f:
+            cfg = nv.VoiceConfig(clone_reference=f.name)
+            self.assertTrue(cfg.clone_ready())
+        cfg_missing = nv.VoiceConfig(clone_reference="/no/such/ref.wav")
+        self.assertFalse(cfg_missing.clone_ready())
+
+    def test_tts_ready_via_clone_only(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".wav") as f:
+            # No ElevenLabs creds, but clone reference exists and is in the chain
+            cfg = nv.VoiceConfig(
+                tts_provider="elevenlabs", tts_fallback="clone", clone_reference=f.name
+            )
+            self.assertFalse(cfg.eleven_ready())
+            self.assertTrue(cfg.clone_ready())
+            self.assertTrue(cfg.tts_ready())
+
+    def test_tts_ready_via_elevenlabs(self):
+        cfg = nv.VoiceConfig(
+            elevenlabs_api_key="k", voice_id="v", tts_fallback="", clone_reference="/no/ref.wav"
+        )
+        self.assertTrue(cfg.eleven_ready())
+        self.assertTrue(cfg.tts_ready())
+
+    def test_tts_not_ready_when_nothing_available(self):
+        cfg = nv.VoiceConfig(tts_provider="elevenlabs", tts_fallback="clone",
+                             clone_reference="/no/ref.wav")
+        self.assertFalse(cfg.tts_ready())
+
+
+class TestCloneGuard(unittest.TestCase):
+    def test_synthesize_returns_none_without_reference(self):
+        # No reference file -> returns None early, never touches the heavy model
+        cfg = nv.VoiceConfig(clone_reference="/no/such/ref.wav")
+        self.assertIsNone(nv.clone_synthesize_to_wav("ciao", cfg))
 
 
 class TestSpeakerTurn(unittest.TestCase):

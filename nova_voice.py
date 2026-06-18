@@ -46,6 +46,7 @@ import logging
 import math
 import os
 import sys
+import tempfile
 import threading
 import time
 import wave
@@ -68,6 +69,11 @@ SAMPLE_WIDTH = 2  # bytes (16-bit)
 FRAME_MS = 20
 FRAME_BYTES = (SAMPLE_RATE * FRAME_MS // 1000) * CHANNELS * SAMPLE_WIDTH  # 3840
 BYTES_PER_MS_STEREO = SAMPLE_RATE * CHANNELS * SAMPLE_WIDTH // 1000        # 192
+
+# Bundled reference clip of Nova's ElevenLabs voice, used by the free clone
+# fallback (XTTS-v2) so the fallback still sounds like Nova. Override with
+# CLONE_REFERENCE_WAV in the environment.
+DEFAULT_CLONE_REFERENCE = str(Path(__file__).resolve().parent / "assets" / "voice" / "nova_reference.wav")
 
 
 # =============================================================================
@@ -282,6 +288,17 @@ class VoiceConfig:
     min_utterance_ms: int = 400
     energy_threshold: int = 350
     history_turns: int = 8
+    # TTS provider chain: primary first, then fallback. Values: "elevenlabs"
+    # (exact Nova voice, needs credits) and "clone" (free local XTTS-v2 that
+    # reproduces Nova's voice from a reference clip). Default: ElevenLabs with
+    # the cloned voice as a free fallback when ElevenLabs is unavailable.
+    tts_provider: str = "elevenlabs"
+    tts_fallback: str = "clone"
+    # Voice cloning (XTTS-v2)
+    clone_model: str = "tts_models/multilingual/multi-dataset/xtts_v2"
+    clone_model_dir: str = ""  # pre-downloaded model dir (skips auto-download)
+    clone_reference: str = ""
+    clone_language: str = ""
 
     @classmethod
     def from_env(cls) -> "VoiceConfig":
@@ -305,10 +322,39 @@ class VoiceConfig:
             min_utterance_ms=_int("VOICE_MIN_UTTERANCE_MS", 400),
             energy_threshold=_int("VOICE_ENERGY_THRESHOLD", 350),
             history_turns=_int("VOICE_HISTORY_TURNS", 8),
+            tts_provider=os.getenv("TTS_PROVIDER", "elevenlabs").strip().lower(),
+            tts_fallback=os.getenv("TTS_FALLBACK", "clone").strip().lower(),
+            clone_model=os.getenv(
+                "CLONE_MODEL", "tts_models/multilingual/multi-dataset/xtts_v2"
+            ).strip(),
+            clone_model_dir=os.getenv("CLONE_MODEL_DIR", "").strip(),
+            clone_reference=os.getenv("CLONE_REFERENCE_WAV", DEFAULT_CLONE_REFERENCE).strip(),
+            clone_language=os.getenv("CLONE_LANGUAGE", "").strip(),
         )
 
-    def tts_ready(self) -> bool:
+    def tts_order(self) -> list[str]:
+        """Providers to try, in order (primary then fallback, de-duplicated)."""
+        order: list[str] = []
+        for p in (self.tts_provider, self.tts_fallback):
+            p = (p or "").strip().lower()
+            if p and p not in order:
+                order.append(p)
+        return order
+
+    def eleven_ready(self) -> bool:
         return bool(self.elevenlabs_api_key and self.voice_id)
+
+    def clone_ready(self) -> bool:
+        return bool(self.clone_reference) and Path(self.clone_reference).exists()
+
+    def tts_ready(self) -> bool:
+        """True if at least one provider in the chain can actually speak."""
+        for p in self.tts_order():
+            if p == "elevenlabs" and self.eleven_ready():
+                return True
+            if p == "clone" and self.clone_ready():
+                return True
+        return False
 
     def stt_ready(self) -> bool:
         provider = self.stt_provider or self.whisper_provider
@@ -410,19 +456,33 @@ def _tts_payload(text: str, config: VoiceConfig) -> dict:
     return payload
 
 
-def eleven_tts_stream(text: str, config: VoiceConfig) -> Iterator[bytes]:
-    """Yield raw audio chunks from ElevenLabs streaming TTS (PCM output)."""
-    resp = requests.post(
-        _tts_url(config),
-        headers={"xi-api-key": config.elevenlabs_api_key, "Content-Type": "application/json"},
-        json=_tts_payload(text, config),
-        stream=True,
-        timeout=60,
-    )
+def eleven_tts_open(text: str, config: VoiceConfig):
+    """POST to ElevenLabs streaming TTS. Return the streaming Response on 200,
+    else None. Lets the caller detect failure (e.g. quota_exceeded) and fall
+    back to another provider BEFORE committing to playback."""
+    try:
+        resp = requests.post(
+            _tts_url(config),
+            headers={"xi-api-key": config.elevenlabs_api_key, "Content-Type": "application/json"},
+            json=_tts_payload(text, config),
+            stream=True,
+            timeout=60,
+        )
+    except requests.RequestException as e:
+        logger.error("voice TTS request error: %s", e)
+        return None
     if resp.status_code != 200:
         body = resp.text[:300] if hasattr(resp, "text") else ""
         logger.error("voice TTS HTTP %s: %s", resp.status_code, body)
         resp.close()
+        return None
+    return resp
+
+
+def eleven_tts_stream(text: str, config: VoiceConfig) -> Iterator[bytes]:
+    """Yield raw audio chunks from ElevenLabs streaming TTS (PCM output)."""
+    resp = eleven_tts_open(text, config)
+    if resp is None:
         return
     try:
         for chunk in resp.iter_content(chunk_size=4096):
@@ -436,6 +496,62 @@ def eleven_tts_bytes(text: str, config: VoiceConfig) -> Optional[bytes]:
     """Fetch the full TTS audio (used for non-PCM formats played via ffmpeg)."""
     chunks = list(eleven_tts_stream(text, config))
     return b"".join(chunks) if chunks else None
+
+
+# =============================================================================
+# Text-to-speech (clone) — free, self-hosted XTTS-v2 reproducing Nova's voice
+# =============================================================================
+_clone_model = None
+_clone_lock = threading.Lock()
+
+
+def _get_clone_model(config: VoiceConfig):
+    """Lazy-load and cache the XTTS-v2 model (heavy: torch + ~1.8 GB weights)."""
+    global _clone_model
+    with _clone_lock:
+        if _clone_model is None:
+            os.environ.setdefault("COQUI_TOS_AGREED", "1")
+            from TTS.api import TTS as CoquiTTS  # lazy, optional heavy dep
+
+            local = config.clone_model_dir
+            if local and (Path(local) / "config.json").exists():
+                logger.info("voice clone: loading local model from %s", local)
+                _clone_model = CoquiTTS(
+                    model_path=local, config_path=str(Path(local) / "config.json")
+                )
+            else:
+                logger.info(
+                    "voice clone: loading %s (first load downloads ~1.8 GB)", config.clone_model
+                )
+                _clone_model = CoquiTTS(config.clone_model)
+        return _clone_model
+
+
+def clone_synthesize_to_wav(text: str, config: VoiceConfig) -> Optional[str]:
+    """Synthesize `text` in Nova's cloned voice to a temp WAV. Return path or None.
+
+    Requires the optional clone stack (`pip install -r requirements-clone.txt`)
+    and a reference clip (bundled at assets/voice/nova_reference.wav). Returns
+    None on any failure so the caller can fall through gracefully.
+    """
+    if not config.clone_ready():
+        logger.warning("voice clone: reference wav missing (%s)", config.clone_reference)
+        return None
+    try:
+        model = _get_clone_model(config)
+        lang = config.clone_language or config.language or "it"
+        fd, path = tempfile.mkstemp(prefix="nova_clone_", suffix=".wav")
+        os.close(fd)
+        model.tts_to_file(
+            text=text,
+            speaker_wav=config.clone_reference,
+            language=lang,
+            file_path=path,
+        )
+        return path
+    except Exception:
+        logger.exception("voice clone: synthesis failed (is the clone stack installed?)")
+        return None
 
 
 # =============================================================================
@@ -658,16 +774,59 @@ class VoiceSession:
 
     # -- outbound audio -----------------------------------------------------
     async def _speak(self, text: str) -> None:
-        if self._vc is None or not self.config.tts_ready():
-            if not self.config.tts_ready():
-                logger.warning("voice: TTS not configured (ELEVENLABS_API_KEY/VOICE_ID); cannot speak")
-            return
-        if self.config.output_format.startswith("pcm"):
-            await self._speak_pcm(text)
-        else:
-            await self._speak_ffmpeg(text)
+        """Speak `text`, trying each TTS provider in the configured chain.
 
-    async def _speak_pcm(self, text: str) -> None:
+        Default chain: ElevenLabs (Nova's exact voice) first; if it's
+        unavailable (no credits / error), fall back to the free local cloned
+        voice — which still sounds like Nova.
+        """
+        if self._vc is None:
+            return
+        if not self.config.tts_ready():
+            logger.warning(
+                "voice: nessun provider TTS pronto (ElevenLabs senza chiavi/crediti "
+                "e nessuna voce clonata disponibile)"
+            )
+            return
+        for provider in self.config.tts_order():
+            try:
+                if provider == "elevenlabs":
+                    if self.config.eleven_ready() and await self._speak_elevenlabs(text):
+                        return
+                elif provider == "clone":
+                    if self.config.clone_ready() and await self._speak_clone(text):
+                        return
+                else:
+                    logger.warning("voice: provider TTS sconosciuto '%s', salto", provider)
+            except Exception:
+                logger.exception("voice: provider '%s' fallito, provo il prossimo", provider)
+        logger.warning("voice: tutti i provider TTS hanno fallito per questa battuta")
+
+    async def _speak_elevenlabs(self, text: str) -> bool:
+        """Speak via ElevenLabs. Return True if audio played, False to fall back."""
+        if self.config.output_format.startswith("pcm"):
+            resp = await asyncio.to_thread(eleven_tts_open, text, self.config)
+            if resp is None:
+                return False
+            await self._play_pcm_stream(resp)
+            return True
+        audio = await asyncio.to_thread(eleven_tts_bytes, text, self.config)
+        if not audio:
+            return False
+        suffix = ".mp3" if "mp3" in self.config.output_format else ".audio"
+        await self._play_media_bytes(audio, suffix)
+        return True
+
+    async def _speak_clone(self, text: str) -> bool:
+        """Speak via the local cloned voice (XTTS-v2). Return True if it played."""
+        path = await asyncio.to_thread(clone_synthesize_to_wav, text, self.config)
+        if not path:
+            return False
+        await self._play_media_path(path)
+        return True
+
+    async def _play_pcm_stream(self, resp) -> None:
+        """Stream PCM chunks from an open ElevenLabs response straight to Discord."""
         buffer = PCMStreamBuffer(FRAME_BYTES)
         self._play_buffer = buffer
         source = _make_audio_source(buffer)
@@ -679,13 +838,14 @@ class VoiceSession:
             if self._loop is not None:
                 self._loop.call_soon_threadsafe(done.set)
 
-        producer = asyncio.create_task(self._produce_tts(text, buffer))
+        producer = asyncio.create_task(self._produce_from_response(resp, buffer))
         try:
             self._vc.play(source, after=_after)
         except Exception:
             logger.exception("voice: failed to start playback")
             buffer.cancel()
-            await producer
+            with suppress(Exception):
+                await producer
             self._play_buffer = None
             return
 
@@ -695,32 +855,35 @@ class VoiceSession:
             await producer
         self._play_buffer = None
 
-    async def _produce_tts(self, text: str, buffer: PCMStreamBuffer) -> None:
+    async def _produce_from_response(self, resp, buffer: PCMStreamBuffer) -> None:
         converter = MonoToStereoConverter()
 
         def _run() -> None:
-            for chunk in eleven_tts_stream(text, self.config):
-                if buffer.cancelled:
-                    break
-                buffer.feed(converter.convert(chunk))
+            try:
+                for chunk in resp.iter_content(chunk_size=4096):
+                    if buffer.cancelled:
+                        break
+                    if chunk:
+                        buffer.feed(converter.convert(chunk))
+            finally:
+                resp.close()
 
         try:
             await asyncio.to_thread(_run)
         finally:
             buffer.end()
 
-    async def _speak_ffmpeg(self, text: str) -> None:
-        import tempfile
-
-        import discord
-
-        audio = await asyncio.to_thread(eleven_tts_bytes, text, self.config)
-        if not audio:
-            return
-        suffix = ".mp3" if "mp3" in self.config.output_format else ".audio"
+    async def _play_media_bytes(self, audio: bytes, suffix: str) -> None:
         fd, path = tempfile.mkstemp(prefix="nova_tts_", suffix=suffix)
         os.close(fd)
         Path(path).write_bytes(audio)
+        await self._play_media_path(path)
+
+    async def _play_media_path(self, path: str) -> None:
+        """Play any audio file via ffmpeg (it resamples to Discord's 48k stereo),
+        then delete it. Used for the cloned voice and non-PCM ElevenLabs output."""
+        import discord
+
         done = asyncio.Event()
 
         def _after(err) -> None:
@@ -794,7 +957,9 @@ class VoiceManager:
         self._sessions[guild.id] = session
         msg = f"Entrata in #{getattr(channel, 'name', '?')}."
         if not self.config.tts_ready():
-            msg += " Attenzione: TTS non configurato, ti sento ma non parlo (ELEVENLABS_API_KEY/VOICE_ID)."
+            msg += " Attenzione: nessun TTS pronto, ti sento ma non parlo."
+        elif not self.config.eleven_ready() and self.config.clone_ready():
+            msg += " (uso la voce clonata di Nova: ElevenLabs non configurato)"
         return True, msg
 
     async def leave(self, guild_id: int) -> tuple[bool, str]:
